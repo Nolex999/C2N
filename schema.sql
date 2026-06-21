@@ -1,5 +1,13 @@
 -- GYD Schema — run this in Supabase SQL Editor
 
+DROP TABLE IF EXISTS scan_result_items CASCADE;
+DROP TABLE IF EXISTS scan_results CASCADE;
+DROP TABLE IF EXISTS audit_logs CASCADE;
+DROP TABLE IF EXISTS invite_codes CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+DROP TABLE IF EXISTS profiles CASCADE;
+DROP TABLE IF EXISTS communities CASCADE;
+
 CREATE TABLE users (
   id UUID PRIMARY KEY,
   email TEXT NOT NULL,
