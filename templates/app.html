@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GYD — Global Device Scanner</title>
+<style>
+:root {
+  --white: #ffffff;
+  --black: #000000;
+  --blue: #2563eb;
+  --blue-light: #3b82f6;
+  --blue-dark: #1d4ed8;
+  --gray-50: #f8fafc;
+  --gray-100: #f1f5f9;
+  --gray-200: #e2e8f0;
+  --gray-300: #cbd5e1;
+  --gray-400: #94a3b8;
+  --gray-500: #64748b;
+  --gray-600: #475569;
+  --gray-700: #334155;
+  --gray-800: #1e293b;
+  --gray-900: #0f172a;
+  --green: #16a34a;
+  --green-light: #dcfce7;
+  --red: #dc2626;
+  --red-light: #fee2e2;
+  --orange: #ea580c;
+  --orange-light: #ffedd5;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-lg: 0 10px 25px rgba(0,0,0,.1);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:var(--gray-50); color:var(--gray-900); min-height:100vh; }
+
+/* Auth screen */
+.auth-screen { display:flex; min-height:100vh; align-items:center; justify-content:center; background:linear-gradient(135deg,var(--white) 0%,var(--gray-50) 100%); }
+.auth-box { background:var(--white); border-radius:16px; box-shadow:var(--shadow-lg); padding:40px; width:400px; max-width:90vw; }
+.auth-logo { font-size:42px; font-weight:900; color:var(--black); text-align:center; letter-spacing:-2px; margin-bottom:4px; }
+.auth-sub { text-align:center; color:var(--gray-500); font-size:14px; margin-bottom:28px; }
+.auth-tabs { display:flex; gap:0; margin-bottom:24px; background:var(--gray-100); border-radius:var(--radius); padding:3px; }
+.auth-tab { flex:1; text-align:center; padding:8px; border:none; background:transparent; border-radius:6px; cursor:pointer; font-size:13px; font-weight:500; color:var(--gray-500); transition:all .15s; }
+.auth-tab.active { background:var(--white); color:var(--black); box-shadow:var(--shadow); }
+.auth-form { display:flex; flex-direction:column; gap:14px; }
+.auth-form input { padding:11px 14px; border:1px solid var(--gray-200); border-radius:var(--radius); font-size:14px; outline:none; transition:border-color .15s; background:var(--gray-50); }
+.auth-form input:focus { border-color:var(--blue); background:var(--white); }
+.auth-btn { padding:11px; border:none; border-radius:var(--radius); font-size:14px; font-weight:600; cursor:pointer; background:var(--black); color:var(--white); transition:all .15s; }
+.auth-btn:hover { background:var(--gray-800); }
+.auth-btn:disabled { opacity:.5; cursor:not-allowed; }
+.auth-error { color:var(--red); font-size:12px; text-align:center; display:none; }
+.auth-success { color:var(--green); font-size:12px; text-align:center; display:none; }
+.invite-hint { font-size:11px; color:var(--gray-400); text-align:center; }
+
+/* App shell */
+.app-shell { display:none; }
+.app-shell.active { display:block; }
+
+/* Header */
+.header { background:var(--white); border-bottom:1px solid var(--gray-200); padding:0 24px; height:60px; display:flex; align-items:center; gap:24px; position:sticky; top:0; z-index:50; }
+.header-logo { font-size:24px; font-weight:900; color:var(--black); letter-spacing:-1px; text-decoration:none; }
+.header-tabs { display:flex; gap:4px; flex:1; }
+.header-tab { padding:6px 16px; border-radius:20px; font-size:13px; font-weight:500; cursor:pointer; color:var(--gray-500); background:transparent; border:none; transition:all .15s; }
+.header-tab:hover { color:var(--gray-700); background:var(--gray-100); }
+.header-tab.active { color:var(--white); background:var(--black); }
+.header-user { display:flex; align-items:center; gap:10px; font-size:13px; color:var(--gray-600); }
+.header-logout { padding:5px 12px; font-size:12px; border:1px solid var(--gray-200); border-radius:var(--radius); background:var(--white); cursor:pointer; color:var(--gray-600); transition:all .12s; }
+.header-logout:hover { border-color:var(--red); color:var(--red); }
+
+/* Content */
+.content { padding:24px; max-width:1400px; margin:0 auto; }
+.tab-page { display:none; }
+.tab-page.active { display:block; }
+
+/* === SCAN TAB === */
+.scan-layout { display:grid; grid-template-columns:340px 1fr; gap:20px; }
+@media(max-width:900px) { .scan-layout { grid-template-columns:1fr; } }
+
+.scan-sidebar { display:flex; flex-direction:column; gap:14px; }
+
+.card { background:var(--white); border:1px solid var(--gray-200); border-radius:12px; padding:18px; box-shadow:var(--shadow); }
+.card-title { font-size:11px; font-weight:600; color:var(--gray-400); text-transform:uppercase; letter-spacing:.5px; margin-bottom:12px; }
+
+.form-group { margin-bottom:12px; }
+.form-group:last-child { margin-bottom:0; }
+.form-label { display:block; font-size:12px; font-weight:500; color:var(--gray-600); margin-bottom:4px; }
+.form-control { width:100%; padding:9px 12px; border:1px solid var(--gray-200); border-radius:var(--radius); font-size:13px; outline:none; background:var(--gray-50); transition:border-color .15s; }
+.form-control:focus { border-color:var(--blue); background:var(--white); }
+select.form-control { cursor:pointer; }
+.form-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.form-check { display:flex; align-items:center; gap:8px; padding:4px 0; }
+.form-check input[type=checkbox] { width:16px; height:16px; cursor:pointer; accent-color:var(--black); }
+.form-check label { font-size:13px; cursor:pointer; color:var(--gray-700); }
+
+.btn { padding:9px 18px; border:none; border-radius:var(--radius); font-size:13px; font-weight:600; cursor:pointer; transition:all .12s; display:inline-flex; align-items:center; gap:6px; }
+.btn-primary { background:var(--black); color:var(--white); }
+.btn-primary:hover { background:var(--gray-800); }
+.btn-primary:disabled { opacity:.4; cursor:not-allowed; }
+.btn-blue { background:var(--blue); color:var(--white); }
+.btn-blue:hover { background:var(--blue-dark); }
+.btn-outline { background:transparent; border:1px solid var(--gray-200); color:var(--gray-600); }
+.btn-outline:hover { border-color:var(--gray-400); }
+.btn-danger { background:var(--red); color:var(--white); }
+.btn-danger:hover { background:#b91c1c; }
+.btn-sm { padding:5px 10px; font-size:11px; }
+.btn-group { display:flex; gap:6px; flex-wrap:wrap; }
+
+.scan-results { display:flex; flex-direction:column; gap:14px; }
+
+.stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; }
+.stat-item { text-align:center; padding:12px 8px; background:var(--gray-50); border-radius:var(--radius); }
+.stat-value { font-size:22px; font-weight:700; line-height:1.2; }
+.stat-value.blue { color:var(--blue); }
+.stat-value.green { color:var(--green); }
+.stat-value.orange { color:var(--orange); }
+.stat-value.dim { color:var(--gray-500); }
+.stat-label { font-size:10px; color:var(--gray-400); text-transform:uppercase; letter-spacing:.3px; margin-top:2px; }
+
+.progress-section { display:none; }
+.progress-section.active { display:block; }
+.progress-bar { height:6px; background:var(--gray-100); border-radius:3px; overflow:hidden; margin:8px 0; }
+.progress-fill { height:100%; background:var(--black); border-radius:3px; transition:width .3s; width:0%; }
+.progress-text { font-size:12px; color:var(--gray-500); }
+
+.table-wrap { overflow-x:auto; border:1px solid var(--gray-200); border-radius:var(--radius); background:var(--white); }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th { padding:9px 10px; text-align:left; font-size:10px; font-weight:600; color:var(--gray-400); text-transform:uppercase; letter-spacing:.4px; background:var(--gray-50); border-bottom:1px solid var(--gray-200); white-space:nowrap; }
+td { padding:8px 10px; border-bottom:1px solid var(--gray-100); white-space:nowrap; }
+tr:hover td { background:var(--gray-50); }
+tr.cred td { border-left:3px solid var(--green); }
+tr.open td { border-left:3px solid var(--orange); }
+.badge { display:inline-block; font-size:9px; padding:2px 7px; border-radius:10px; font-weight:600; }
+.badge-creds { background:var(--green-light); color:var(--green); }
+.badge-open { background:var(--orange-light); color:var(--orange); }
+.badge-auth { background:var(--gray-100); color:var(--gray-600); }
+.url-cell { font-family:monospace; font-size:11px; max-width:180px; overflow:hidden; text-overflow:ellipsis; }
+.cred-text { font-family:monospace; font-size:11px; color:var(--green); font-weight:500; }
+
+.live-log { background:#0a0a0a; border:1px solid var(--gray-200); border-radius:var(--radius); max-height:180px; overflow-y:auto; font-family:monospace; font-size:11px; display:none; }
+.live-log.active { display:block; }
+.log-header { padding:6px 12px; font-size:10px; color:var(--gray-500); text-transform:uppercase; background:var(--gray-900); border-bottom:1px solid #1a1a1a; position:sticky; top:0; }
+.log-body { padding:2px 0; }
+.log-line { padding:3px 12px; color:#ccc; border-bottom:1px solid #111; }
+.log-line .ts { color:#666; margin-right:8px; }
+.log-line .hit { color:#4ade80; }
+.log-line .hit-open { color:#fb923c; }
+.log-line .info { color:#60a5fa; }
+.log-line .err { color:#f87171; }
+
+/* === OUTPUT TAB === */
+.output-layout { display:grid; grid-template-columns:320px 1fr; gap:20px; height:calc(100vh - 84px); }
+@media(max-width:900px) { .output-layout { grid-template-columns:1fr; } }
+
+.output-list { overflow-y:auto; display:flex; flex-direction:column; gap:6px; }
+.output-group { margin-bottom:4px; }
+.output-group-title { font-size:11px; font-weight:600; color:var(--gray-400); text-transform:uppercase; padding:6px 0; letter-spacing:.4px; }
+.output-card { padding:12px 14px; background:var(--white); border:1px solid var(--gray-200); border-radius:var(--radius); cursor:pointer; transition:all .12s; }
+.output-card:hover { border-color:var(--blue); }
+.output-card.active { border-color:var(--black); box-shadow:0 0 0 1px var(--black); }
+.output-card-main { display:flex; justify-content:space-between; align-items:center; }
+.output-card-info { flex:1; }
+.output-card-region { font-size:11px; font-weight:600; color:var(--gray-700); }
+.output-card-meta { font-size:11px; color:var(--gray-400); margin-top:2px; display:flex; gap:12px; }
+.output-card-stats { display:flex; gap:8px; font-size:11px; }
+.output-card-stat { padding:1px 6px; border-radius:4px; background:var(--gray-100); color:var(--gray-600); font-weight:500; }
+.output-card-stat.green { background:var(--green-light); color:var(--green); }
+.output-card-stat.orange { background:var(--orange-light); color:var(--orange); }
+
+.output-detail { display:flex; flex-direction:column; gap:14px; overflow-y:auto; padding-right:4px; }
+.output-detail-header { display:flex; justify-content:space-between; align-items:center; }
+.output-detail-header h3 { font-size:16px; font-weight:600; }
+.output-detail-actions { display:flex; gap:6px; }
+.output-view-toggle { display:flex; gap:2px; background:var(--gray-100); border-radius:var(--radius); padding:2px; }
+.view-btn { padding:5px 12px; border:none; background:transparent; border-radius:6px; font-size:11px; font-weight:500; cursor:pointer; color:var(--gray-500); transition:all .12s; }
+.view-btn.active { background:var(--white); color:var(--black); box-shadow:var(--shadow); }
+
+.output-items { display:flex; flex-direction:column; gap:4px; }
+
+.result-item { background:var(--white); border:1px solid var(--gray-200); border-radius:var(--radius); overflow:hidden; transition:all .12s; }
+.result-item:hover { border-color:var(--gray-300); }
+.result-item.broken { border-left:3px solid var(--green); }
+.result-item-header { padding:10px 14px; display:flex; align-items:center; gap:10px; cursor:pointer; }
+.result-item-header:hover { background:var(--gray-50); }
+.result-item-badge { flex-shrink:0; }
+.result-item-info { flex:1; min-width:0; }
+.result-item-ip { font-weight:500; font-size:13px; }
+.result-item-device { font-size:11px; color:var(--gray-500); margin-top:1px; }
+.result-item-actions { display:flex; gap:4px; flex-shrink:0; }
+
+.result-item-body { display:none; border-top:1px solid var(--gray-100); padding:14px; }
+.result-item-body.open { display:block; }
+.result-item-raw { background:var(--gray-900); color:#e2e8f0; border-radius:var(--radius); padding:14px; font-family:monospace; font-size:11px; overflow-x:auto; white-space:pre-wrap; max-height:300px; overflow-y:auto; display:none; }
+.result-item-raw.show { display:block; }
+.result-item-unraw { display:none; }
+.result-item-unraw.show { display:block; }
+.unraw-grid { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+.unraw-item { padding:6px 10px; background:var(--gray-50); border-radius:6px; }
+.unraw-label { font-size:10px; color:var(--gray-400); text-transform:uppercase; }
+.unraw-value { font-size:12px; color:var(--gray-800); margin-top:1px; word-break:break-all; }
+
+.interact-panel { margin-top:10px; padding:12px; background:var(--gray-50); border-radius:var(--radius); border:1px solid var(--gray-200); }
+.interact-title { font-size:12px; font-weight:600; margin-bottom:8px; display:flex; align-items:center; gap:6px; }
+.interact-title .dot { width:8px; height:8px; border-radius:50%; background:var(--gray-300); display:inline-block; }
+.interact-title .dot.broken { background:var(--green); }
+.interact-row { display:flex; gap:6px; margin-bottom:6px; }
+.interact-row input { flex:1; padding:7px 10px; border:1px solid var(--gray-200); border-radius:var(--radius); font-size:12px; outline:none; }
+.interact-row input:focus { border-color:var(--blue); }
+.interact-output { background:var(--gray-900); color:#e2e8f0; border-radius:var(--radius); padding:10px; font-family:monospace; font-size:11px; max-height:200px; overflow:auto; white-space:pre-wrap; display:none; margin-top:6px; }
+.interact-output.show { display:block; }
+.interact-btn { padding:7px 14px; border:none; border-radius:var(--radius); font-size:11px; font-weight:600; cursor:pointer; transition:all .12s; white-space:nowrap; }
+.interact-btn.test { background:var(--blue); color:white; }
+.interact-btn.test:hover { background:var(--blue-dark); }
+.interact-btn.access { background:var(--black); color:white; }
+.interact-btn.access:hover { background:var(--gray-800); }
+.interact-btn.shell { background:var(--gray-600); color:white; }
+.interact-btn.shell:hover { background:var(--gray-700); }
+.interact-btn:disabled { opacity:.4; cursor:not-allowed; }
+
+.empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; padding:60px 20px; color:var(--gray-400); text-align:center; }
+.empty-state .icon { font-size:48px; margin-bottom:12px; opacity:.4; }
+.empty-state h3 { font-size:16px; color:var(--gray-600); margin-bottom:6px; }
+.empty-state p { font-size:13px; max-width:360px; line-height:1.6; }
+
+.toast { position:fixed; bottom:24px; right:24px; background:var(--gray-900); color:white; padding:10px 18px; border-radius:var(--radius); font-size:13px; box-shadow:var(--shadow-lg); opacity:0; transform:translateY(12px); transition:all .25s; pointer-events:none; z-index:999; max-width:400px; }
+.toast.show { opacity:1; transform:translateY(0); }
+.toast.error { background:var(--red); }
+.toast.success { background:var(--green); }
+
+/* Loading spinner */
+.spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--gray-200); border-top-color:var(--gray-600); border-radius:50%; animation:spin .6s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+</style>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyA0IMTr_DT6SRA1I5xKxhVfMaY-1xOqFUk",
+  authDomain: "getyourdevice.firebaseapp.com",
+  projectId: "getyourdevice",
+  storageBucket: "getyourdevice.firebasestorage.app",
+  messagingSenderId: "716409386995",
+  appId: "1:716409386995:web:a574074fb9da6b6fcb4486",
+  measurementId: "G-VWEM9479JG"
+};
+firebase.initializeApp(firebaseConfig);
+</script>
+</head>
+<body>
+
+<!-- Auth Screen -->
+<div class="auth-screen" id="auth-screen">
+  <div class="auth-box">
+    <div class="auth-logo">GYD</div>
+    <div class="auth-sub">Global Device Scanner</div>
+    <div class="auth-tabs">
+      <button class="auth-tab active" onclick="switchAuth('login')">Login</button>
+      <button class="auth-tab" onclick="switchAuth('register')">Register</button>
+    </div>
+    <div id="auth-error" class="auth-error"></div>
+    <div id="auth-success" class="auth-success"></div>
+
+    <!-- Login form -->
+    <form class="auth-form" id="login-form" onsubmit="return doLogin(event)">
+      <input type="email" id="login-email" placeholder="Email" required>
+      <input type="password" id="login-password" placeholder="Password" required>
+      <button class="auth-btn" type="submit" id="login-btn">Login</button>
+    </form>
+
+    <!-- Register form -->
+    <form class="auth-form" id="register-form" style="display:none" onsubmit="return doRegister(event)">
+      <input type="email" id="reg-email" placeholder="Email" required>
+      <input type="password" id="reg-password" placeholder="Password (6+ chars)" required minlength="6">
+      <input type="text" id="reg-invite" placeholder="Invitation Code" required>
+      <div class="invite-hint">Registration requires a valid invitation code</div>
+      <button class="auth-btn" type="submit" id="reg-btn">Register</button>
+    </form>
+  </div>
+</div>
+
+<!-- App Shell -->
+<div class="app-shell" id="app-shell">
+  <div class="header">
+    <a class="header-logo" href="/">GYD</a>
+    <div class="header-tabs">
+      <button class="header-tab active" onclick="switchTab('scan')" id="tab-scan">Scan</button>
+      <button class="header-tab" onclick="switchTab('output')" id="tab-output">Output</button>
+    </div>
+    <div class="header-user">
+      <span id="user-email"></span>
+      <button class="header-logout" onclick="doLogout()">Logout</button>
+    </div>
+  </div>
+
+  <div class="content">
+    <!-- Scan Tab -->
+    <div class="tab-page active" id="page-scan">
+      <div class="scan-layout">
+        <div class="scan-sidebar">
+          <div class="card">
+            <div class="card-title">Scan Configuration</div>
+            <div class="form-group">
+              <label class="form-label">Region</label>
+              <select class="form-control" id="sc-region">
+                <option value="worldwide">Worldwide (all RIRs)</option>
+                <option value="europe">Europe (RIPE)</option>
+                <option value="north-america">North America (ARIN)</option>
+                <option value="asia">Asia Pacific (APNIC)</option>
+                <option value="latin-america">Latin America (LACNIC)</option>
+                <option value="africa">Africa (AFRINIC)</option>
+                <option value="subsaharan">Sub-Saharan Africa</option>
+                <option value="internet">Random Internet</option>
+              </select>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Max IPs</label>
+                <input class="form-control" type="number" id="sc-maxips" value="200" min="10" max="5000" step="100">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Batch</label>
+                <input class="form-control" type="number" id="sc-batch" value="50" min="10" max="500" step="10">
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label">Threads</label>
+                <input class="form-control" type="number" id="sc-threads" value="20" min="1" max="100">
+              </div>
+              <div class="form-group">
+                <label class="form-label">Ports</label>
+                <select class="form-control" id="sc-ports">
+                  <option value="fast">Fast (12)</option>
+                  <option value="all">All + WebCam</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Country Filter</label>
+              <input class="form-control" type="text" id="sc-country" placeholder="e.g. GB,DE,FR (optional)">
+            </div>
+            <div class="form-check">
+              <input type="checkbox" id="sc-geo" checked>
+              <label for="sc-geo">Geolocation enrichment</label>
+            </div>
+            <div style="margin-top:12px;display:flex;gap:6px;">
+              <button class="btn btn-primary" id="sc-start-btn" onclick="startScan()" style="flex:1">&#9654; Start</button>
+              <button class="btn btn-outline" id="sc-stop-btn" onclick="stopScan()" disabled>&#9632;</button>
+              <button class="btn btn-outline" onclick="clearScanResults()">&#10005;</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="scan-results">
+          <div class="card">
+            <div class="stats-grid" id="scan-stats">
+              <div class="stat-item"><div class="stat-value dim" id="stat-scanned">0</div><div class="stat-label">Scanned</div></div>
+              <div class="stat-item"><div class="stat-value blue" id="stat-hit">0</div><div class="stat-label">Responded</div></div>
+              <div class="stat-item"><div class="stat-value blue" id="stat-devices">0</div><div class="stat-label">Devices</div></div>
+              <div class="stat-item"><div class="stat-value green" id="stat-creds">0</div><div class="stat-label">Creds</div></div>
+              <div class="stat-item"><div class="stat-value orange" id="stat-open">0</div><div class="stat-label">Open</div></div>
+              <div class="stat-item"><div class="stat-value dim" id="stat-time">0:00</div><div class="stat-label">Time</div></div>
+            </div>
+            <div class="progress-section" id="progress-section">
+              <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+              <div class="progress-text" id="progress-text">Ready</div>
+            </div>
+          </div>
+
+          <div class="live-log" id="live-log">
+            <div class="log-header">Live Log</div>
+            <div class="log-body" id="log-body"></div>
+          </div>
+
+          <div id="scan-empty" class="empty-state">
+            <div class="icon">&#9881;</div>
+            <h3>Ready to Scan</h3>
+            <p>Configure parameters and click <strong>Start</strong>. Results appear in real-time.</p>
+          </div>
+
+          <div class="table-wrap" id="scan-table" style="display:none">
+            <table>
+              <thead><tr><th>IP</th><th>Port</th><th>URL</th><th>Device</th><th>Status</th><th>Auth</th><th>Country</th><th>Org</th></tr></thead>
+              <tbody id="scan-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output Tab -->
+    <div class="tab-page" id="page-output">
+      <div class="output-layout">
+        <div class="output-list" id="output-list">
+          <div class="empty-state" id="output-empty">
+            <div class="icon">&#128196;</div>
+            <h3>No Outputs Yet</h3>
+            <p>Run a scan first, then results will appear here grouped by date.</p>
+          </div>
+        </div>
+
+        <div class="output-detail" id="output-detail" style="display:none">
+          <div class="output-detail-header">
+            <h3 id="detail-title">Scan Results</h3>
+            <div class="output-detail-actions">
+              <div class="output-view-toggle">
+                <button class="view-btn active" onclick="setDetailView('grouped')" id="view-grouped">Grouped</button>
+                <button class="view-btn" onclick="setDetailView('raw')" id="view-raw">Raw JSON</button>
+              </div>
+              <button class="btn btn-sm btn-outline" onclick="deleteSelectedResult()">&#10005;</button>
+            </div>
+          </div>
+          <div id="detail-body"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ─────────── Auth ───────────
+const TOKEN_KEY = 'gyd_token';
+
+function getToken() { return localStorage.getItem(TOKEN_KEY); }
+
+async function api(url, opts = {}) {
+  const token = getToken();
+  const headers = { 'Content-Type': 'application/json', ...opts.headers };
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const resp = await fetch(url, { ...opts, headers });
+  if (resp.status === 401 && !url.includes('/auth/')) {
+    doLogout();
+    throw new Error('Session expired');
+  }
+  return resp;
+}
+
+function switchAuth(tab) {
+  document.querySelectorAll('.auth-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.auth-tab:nth-child(${tab === 'login' ? 1 : 2})`).classList.add('active');
+  document.getElementById('login-form').style.display = tab === 'login' ? 'flex' : 'none';
+  document.getElementById('register-form').style.display = tab === 'register' ? 'flex' : 'none';
+  document.getElementById('auth-error').style.display = 'none';
+  document.getElementById('auth-success').style.display = 'none';
+}
+
+function showAuthError(msg) {
+  const el = document.getElementById('auth-error');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+function showAuthSuccess(msg) {
+  const el = document.getElementById('auth-success');
+  el.textContent = msg; el.style.display = 'block';
+}
+
+async function getIdToken() {
+  const user = firebase.auth().currentUser;
+  return user ? await user.getIdToken() : null;
+}
+
+async function doLogin(e) {
+  e.preventDefault();
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true; btn.textContent = 'Logging in...';
+  try {
+    const cred = await firebase.auth().signInWithEmailAndPassword(
+      document.getElementById('login-email').value,
+      document.getElementById('login-password').value
+    );
+    const idToken = await cred.user.getIdToken();
+    const resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ id_token: idToken })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showAuthError(data.error); return; }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    document.getElementById('user-email').textContent = data.user.email;
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-shell').classList.add('active');
+    loadOutputs();
+  } catch(e) { showAuthError(e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Login'; }
+}
+
+async function doRegister(e) {
+  e.preventDefault();
+  const btn = document.getElementById('reg-btn');
+  btn.disabled = true; btn.textContent = 'Registering...';
+  try {
+    const cred = await firebase.auth().createUserWithEmailAndPassword(
+      document.getElementById('reg-email').value,
+      document.getElementById('reg-password').value
+    );
+    const idToken = await cred.user.getIdToken();
+    const resp = await fetch('/api/auth/register', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        id_token: idToken,
+        invite_code: document.getElementById('reg-invite').value
+      })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { showAuthError(data.error); return; }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    document.getElementById('user-email').textContent = data.user.email;
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-shell').classList.add('active');
+    loadOutputs();
+  } catch(e) { showAuthError(e.message); }
+  finally { btn.disabled = false; btn.textContent = 'Register'; }
+}
+
+async function doLogout() {
+  localStorage.removeItem(TOKEN_KEY);
+  await firebase.auth().signOut();
+  document.getElementById('auth-screen').style.display = 'flex';
+  document.getElementById('app-shell').classList.remove('active');
+}
+
+async function checkAuth() {
+  const token = getToken();
+  if (!token) return;
+  try {
+    const resp = await fetch('/api/auth/me', { headers: {'Authorization': 'Bearer ' + token} });
+    if (!resp.ok) { localStorage.removeItem(TOKEN_KEY); return; }
+    const data = await resp.json();
+    document.getElementById('user-email').textContent = data.user.email;
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-shell').classList.add('active');
+    loadOutputs();
+  } catch(e) {}
+}
+
+// Listen for Firebase auth state changes
+firebase.auth().onAuthStateChanged(async (user) => {
+  if (user) {
+    const token = getToken();
+    if (!token) {
+      const idToken = await user.getIdToken();
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ id_token: idToken })
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        localStorage.setItem(TOKEN_KEY, data.token);
+        document.getElementById('user-email').textContent = data.user.email;
+        document.getElementById('auth-screen').style.display = 'none';
+        document.getElementById('app-shell').classList.add('active');
+        loadOutputs();
+      }
+    }
+  } else if (!window.location.hash) {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+});
+
+// ─────────── Tabs ───────────
+function switchTab(name) {
+  document.querySelectorAll('.header-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('page-' + name).classList.add('active');
+  if (name === 'output') loadOutputs();
+}
+
+// ─────────── Scan ───────────
+let scanning = false, stopped = false;
+let scanResults = [], totalScanned = 0, totalResp = 0;
+let scanStartTime = null, scanTimer = null;
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast show';
+  if (type) t.classList.add(type);
+  clearTimeout(t._hide);
+  t._hide = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function log(msg, cls) {
+  const body = document.getElementById('log-body');
+  const line = document.createElement('div');
+  line.className = 'log-line';
+  const ts = new Date().toISOString().slice(11,19);
+  line.innerHTML = `<span class="ts">[${ts}]</span><span class="${cls}">${msg}</span>`;
+  body.appendChild(line);
+  body.scrollTop = body.scrollHeight;
+  document.getElementById('live-log').classList.add('active');
+}
+
+function updateScanStats() {
+  document.getElementById('stat-scanned').textContent = totalScanned;
+  document.getElementById('stat-hit').textContent = totalResp;
+  const devices = scanResults.filter(r => r.device && r.device !== 'Unknown HTTP Service').length;
+  const creds = scanResults.filter(r => r.auth_found).length;
+  const open = scanResults.filter(r => r.no_auth).length;
+  document.getElementById('stat-devices').textContent = devices;
+  document.getElementById('stat-creds').textContent = creds;
+  document.getElementById('stat-open').textContent = open;
+  if (scanStartTime) {
+    const sec = Math.floor((Date.now() - scanStartTime) / 1000);
+    document.getElementById('stat-time').textContent = Math.floor(sec/60) + ':' + String(sec%60).padStart(2,'0');
+  }
+}
+
+function renderScanResults() {
+  const tbody = document.getElementById('scan-tbody');
+  const table = document.getElementById('scan-table');
+  const empty = document.getElementById('scan-empty');
+
+  if (scanResults.length === 0) {
+    table.style.display = 'none';
+    empty.style.display = 'flex';
+    return;
+  }
+  table.style.display = '';
+  empty.style.display = 'none';
+
+  tbody.innerHTML = scanResults.slice().reverse().map(r => {
+    const cls = r.auth_found ? 'cred' : (r.no_auth ? 'open' : '');
+    const badge = r.auth_found ? '<span class="badge badge-creds">CRED</span>' : (r.no_auth ? '<span class="badge badge-open">OPEN</span>' : '<span class="badge badge-auth">AUTH</span>');
+    const cred = r.auth_found ? `<span class="cred-text">${r.username}:${r.password}</span>` : '-';
+    const cc = r.country_code || '-';
+    const org = (r.org || '-').slice(0,22);
+    return `<tr class="${cls}"><td>${r.ip}</td><td>${r.port}</td><td class="url-cell" title="${r.url}">${r.url}</td><td>${r.device||'?'}</td><td>${badge}</td><td>${cred}</td><td>${cc}</td><td>${org}</td></tr>`;
+  }).join('');
+}
+
+async function scanChunk(batchSize) {
+  const region = document.getElementById('sc-region').value;
+  const threads = parseInt(document.getElementById('sc-threads').value);
+  const ports = document.getElementById('sc-ports').value;
+  const country = document.getElementById('sc-country').value.trim();
+  const geo = document.getElementById('sc-geo').checked;
+
+  const body = { max_ips: batchSize, threads, ports, geo };
+  if (region === 'internet') { body.internet = true; }
+  else { body.region = region; }
+  if (country) body.country = country;
+
+  const resp = await api('/api/scan', { method: 'POST', body: JSON.stringify(body) });
+  if (!resp.ok) throw new Error('Scan failed');
+  return await resp.json();
+}
+
+async function startScan() {
+  if (scanning) return;
+  scanning = true; stopped = false;
+  totalScanned = 0; totalResp = 0;
+  scanResults = [];
+  scanStartTime = Date.now();
+
+  document.getElementById('sc-start-btn').disabled = true;
+  document.getElementById('sc-stop-btn').disabled = false;
+  document.getElementById('scan-empty').style.display = 'none';
+  document.getElementById('progress-section').classList.add('active');
+
+  scanTimer = setInterval(updateScanStats, 1000);
+
+  const maxIps = parseInt(document.getElementById('sc-maxips').value);
+  const batchSize = parseInt(document.getElementById('sc-batch').value);
+  const total = Math.ceil(maxIps / batchSize);
+  const actual = Math.min(batchSize, maxIps);
+
+  log('Starting scan: ' + maxIps + ' IPs, ' + actual + '/batch', 'info');
+
+  for (let i = 0; i < total; i++) {
+    if (stopped) { log('Scan stopped by user', 'info'); break; }
+    try {
+      const data = await scanChunk(actual);
+      totalScanned += data.total_scanned || actual;
+      totalResp += data.results_count || 0;
+      if (data.results) {
+        for (const r of data.results) {
+          scanResults.push(r);
+          if (r.auth_found) log('CRED ' + r.url + ' | ' + r.device + ' | ' + r.username + ':' + r.password, 'hit');
+          else if (r.no_auth) log('OPEN ' + r.url + ' | ' + r.device, 'hit-open');
+        }
+      }
+      renderScanResults();
+      updateScanStats();
+      const pct = Math.min(100, (totalScanned / maxIps) * 100);
+      document.getElementById('progress-fill').style.width = pct + '%';
+      document.getElementById('progress-text').textContent = totalScanned + ' / ' + maxIps + ' IPs — ' + scanResults.length + ' results';
+    } catch(e) {
+      log('Batch error: ' + e.message, 'err');
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const data = await scanChunk(actual);
+        totalScanned += data.total_scanned || actual;
+        if (data.results) scanResults.push(...data.results);
+        renderScanResults(); updateScanStats();
+      } catch(e2) { log('Retry failed: ' + e2.message, 'err'); }
+    }
+    if (i < total - 1 && !stopped) await new Promise(r => setTimeout(r, 300));
+  }
+  finishScan();
+}
+
+function finishScan() {
+  scanning = false;
+  document.getElementById('sc-start-btn').disabled = false;
+  document.getElementById('sc-stop-btn').disabled = true;
+  clearInterval(scanTimer);
+  updateScanStats();
+  if (!stopped) {
+    document.getElementById('progress-fill').style.width = '100%';
+    document.getElementById('progress-text').textContent = 'Complete — ' + scanResults.length + ' results from ' + totalScanned + ' IPs';
+    log('Scan completed: ' + scanResults.length + ' results', 'info');
+    showToast('Scan complete: ' + scanResults.length + ' results', 'success');
+  }
+  stopped = false;
+}
+
+function stopScan() { stopped = true; document.getElementById('sc-stop-btn').disabled = true; }
+
+function clearScanResults() {
+  if (scanning) return;
+  scanResults = []; totalScanned = 0; totalResp = 0;
+  document.getElementById('scan-tbody').innerHTML = '';
+  document.getElementById('scan-table').style.display = 'none';
+  document.getElementById('scan-empty').style.display = 'flex';
+  document.getElementById('progress-section').classList.remove('active');
+  document.getElementById('live-log').classList.remove('active');
+  document.getElementById('log-body').innerHTML = '';
+  document.getElementById('progress-fill').style.width = '0%';
+  document.getElementById('stat-scanned').textContent = '0';
+  document.getElementById('stat-hit').textContent = '0';
+  document.getElementById('stat-devices').textContent = '0';
+  document.getElementById('stat-creds').textContent = '0';
+  document.getElementById('stat-open').textContent = '0';
+  document.getElementById('stat-time').textContent = '0:00';
+  document.getElementById('progress-text').textContent = 'Ready';
+}
+
+// ─────────── Output / Results ───────────
+let outputsData = [];
+let selectedResultId = null;
+let detailView = 'grouped';
+
+async function loadOutputs() {
+  try {
+    const resp = await api('/api/results');
+    if (!resp.ok) return;
+    outputsData = await resp.json();
+    renderOutputList();
+  } catch(e) {}
+}
+
+function renderOutputList() {
+  const list = document.getElementById('output-list');
+  const empty = document.getElementById('output-empty');
+  if (!outputsData || outputsData.length === 0) {
+    list.innerHTML = '';
+    list.appendChild(empty);
+    return;
+  }
+
+  const groups = {};
+  for (const r of outputsData) {
+    const d = (r.created_at || '').slice(0, 10);
+    if (!groups[d]) groups[d] = [];
+    groups[d].push(r);
+  }
+
+  let html = '';
+  for (const [date, items] of Object.entries(groups).sort().reverse()) {
+    html += '<div class="output-group"><div class="output-group-title">' + date + '</div>';
+    for (const item of items) {
+      const isActive = selectedResultId === item.id;
+      html += `<div class="output-card${isActive ? ' active' : ''}" onclick="selectResult('${item.id}')">
+        <div class="output-card-main">
+          <div class="output-card-info">
+            <div class="output-card-region">${item.region || 'internet'}</div>
+            <div class="output-card-meta">
+              <span>${item.total_scanned || 0} IPs</span>
+              <span>${item.results_count || 0} results</span>
+              <span>${(item.created_at || '').slice(11,19)}</span>
+            </div>
+          </div>
+          <div class="output-card-stats">
+            <span class="output-card-stat green">${item.creds_count || 0}</span>
+            <span class="output-card-stat orange">${item.open_count || 0}</span>
+          </div>
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+  }
+  list.innerHTML = html;
+}
+
+async function selectResult(id) {
+  selectedResultId = id;
+  renderOutputList();
+
+  const detail = document.getElementById('output-detail');
+  const body = document.getElementById('detail-body');
+  detail.style.display = 'flex';
+
+  try {
+    const resp = await api('/api/results/' + id + '/items');
+    if (!resp.ok) return;
+    const items = await resp.json();
+
+    const result = outputsData.find(r => r.id == id);
+    document.getElementById('detail-title').textContent = (result ? (result.region || 'Scan') : 'Results') + ' — ' + items.length + ' items';
+
+    if (detailView === 'raw') {
+      body.innerHTML = '<div class="result-item-raw show" style="display:block">' + escapeHtml(JSON.stringify(items, null, 2)) + '</div>';
+      return;
+    }
+
+    // Grouped view
+    let html = '<div class="output-items">';
+    for (const item of items) {
+      const badge = item.auth_found ? '<span class="badge badge-creds">CRED</span>' : (item.no_auth ? '<span class="badge badge-open">OPEN</span>' : '<span class="badge badge-auth">AUTH</span>');
+      html += `<div class="result-item${item.broken ? ' broken' : ''}" id="item-${item.id}">
+        <div class="result-item-header" onclick="toggleItemBody(${item.id})">
+          <div class="result-item-badge">${badge}</div>
+          <div class="result-item-info">
+            <div class="result-item-ip">${item.ip}:${item.port} <span style="font-weight:400;color:var(--gray-400);font-size:11px">${item.device||'?'}</span></div>
+            <div class="result-item-device">${item.country_code || ''} ${item.org ? '• ' + item.org.slice(0,30) : ''}</div>
+          </div>
+          <div class="result-item-actions">
+            <button class="btn btn-sm btn-blue" onclick="event.stopPropagation();testDevice(${item.id})">Test</button>
+          </div>
+        </div>
+        <div class="result-item-body" id="body-${item.id}">
+          <div class="result-item-raw" id="raw-${item.id}">${escapeHtml(JSON.stringify(item, null, 2))}</div>
+          <div class="result-item-unraw show" id="unraw-${item.id}">
+            <div class="unraw-grid">
+              <div class="unraw-item"><div class="unraw-label">IP</div><div class="unraw-value">${item.ip}</div></div>
+              <div class="unraw-item"><div class="unraw-label">Port</div><div class="unraw-value">${item.port}</div></div>
+              <div class="unraw-item"><div class="unraw-label">URL</div><div class="unraw-value">${item.url || '-'}</div></div>
+              <div class="unraw-item"><div class="unraw-label">Device</div><div class="unraw-value">${item.device || '?'}</div></div>
+              <div class="unraw-item"><div class="unraw-label">Auth</div><div class="unraw-value">${item.auth_found ? item.username+':'+item.password : (item.no_auth ? 'No auth required' : 'Protected')}</div></div>
+              ${item.country ? '<div class="unraw-item"><div class="unraw-label">Country</div><div class="unraw-value">'+item.country+' ('+(item.country_code||'')+')</div></div>' : ''}
+              ${item.org ? '<div class="unraw-item"><div class="unraw-label">Org</div><div class="unraw-value">'+item.org+'</div></div>' : ''}
+              ${item.city ? '<div class="unraw-item"><div class="unraw-label">City</div><div class="unraw-value">'+item.city+'</div></div>' : ''}
+              ${item.isp ? '<div class="unraw-item"><div class="unraw-label">ISP</div><div class="unraw-value">'+item.isp+'</div></div>' : ''}
+              ${item.lat ? '<div class="unraw-item"><div class="unraw-label">Coordinates</div><div class="unraw-value">'+item.lat+', '+item.lon+'</div></div>' : ''}
+            </div>
+            <div class="interact-panel" id="interact-${item.id}">
+              <div class="interact-title">
+                <span class="dot" id="dot-${item.id}"></span>
+                Device Interaction
+                <span style="font-size:10px;color:var(--gray-400);font-weight:400" id="status-${item.id}">— not tested</span>
+              </div>
+              <div class="interact-row">
+                <input type="text" id="test-user-${item.id}" placeholder="Username" value="${item.username || 'admin'}">
+                <input type="text" id="test-pass-${item.id}" placeholder="Password" value="${item.password || 'admin'}">
+                <button class="interact-btn test" onclick="testDevice(${item.id})">Test</button>
+              </div>
+              <div class="interact-row" style="display:none" id="shell-row-${item.id}">
+                <input type="text" id="shell-cmd-${item.id}" placeholder="Command (e.g. id, whoami, ls)" value="id">
+                <button class="interact-btn shell" onclick="execShell(${item.id})">Exec</button>
+                <button class="interact-btn access" onclick="openDevice(${item.id})">Open</button>
+              </div>
+              <div class="interact-output" id="interact-out-${item.id}"></div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+    html += '</div>';
+    body.innerHTML = html;
+  } catch(e) {
+    body.innerHTML = '<div class="empty-state"><p>Error loading results</p></div>';
+  }
+}
+
+function setDetailView(mode) {
+  detailView = mode;
+  document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + mode).classList.add('active');
+  if (selectedResultId) selectResult(selectedResultId);
+}
+
+function toggleItemBody(id) {
+  const body = document.getElementById('body-' + id);
+  body.classList.toggle('open');
+}
+
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function deleteSelectedResult() {
+  if (!selectedResultId) return;
+  if (!confirm('Delete this scan result and all its items?')) return;
+  try {
+    await api('/api/results/' + selectedResultId, { method: 'DELETE' });
+    selectedResultId = null;
+    document.getElementById('output-detail').style.display = 'none';
+    loadOutputs();
+    showToast('Result deleted', 'success');
+  } catch(e) { showToast('Delete failed', 'error'); }
+}
+
+// ─────────── Device Interaction ───────────
+async function testDevice(itemId) {
+  const out = document.getElementById('interact-out-' + itemId);
+  const status = document.getElementById('status-' + itemId);
+  const dot = document.getElementById('dot-' + itemId);
+  const shellRow = document.getElementById('shell-row-' + itemId);
+  const user = document.getElementById('test-user-' + itemId).value;
+  const pass = document.getElementById('test-pass-' + itemId).value;
+
+  out.textContent = 'Testing...';
+  out.classList.add('show');
+
+  try {
+    const resp = await api('/api/devices/' + itemId + '/test', { method: 'POST', body: JSON.stringify({ username: user, password: pass }) });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      out.innerHTML = '✅ ' + data.message + '\nHTTP ' + data.status_code + '\n\n' + escapeHtml(JSON.stringify(data.headers, null, 2));
+      status.textContent = '✅ Working!';
+      status.style.color = 'var(--green)';
+      dot.className = 'dot broken';
+      shellRow.style.display = 'flex';
+      showToast('Device ' + itemId + ' — credentials work!', 'success');
+    } else {
+      out.textContent = '❌ ' + (data.message || 'Failed');
+      status.textContent = '❌ Failed';
+      status.style.color = 'var(--red)';
+      dot.className = 'dot';
+      shellRow.style.display = 'none';
+    }
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+    status.textContent = 'Error';
+    status.style.color = 'var(--red)';
+  }
+}
+
+async function execShell(itemId) {
+  const out = document.getElementById('interact-out-' + itemId);
+  const cmd = document.getElementById('shell-cmd-' + itemId).value;
+  out.textContent = 'Executing: ' + cmd + '...';
+
+  try {
+    const resp = await api('/api/devices/' + itemId + '/access', { method: 'POST', body: JSON.stringify({ action: 'shell', command: cmd }) });
+    const data = await resp.json();
+    if (data.status === 'ok') {
+      out.innerHTML = '✅ Output:\n' + escapeHtml(data.output || data.message || '(empty)');
+    } else {
+      out.textContent = '❌ ' + (data.message || 'Failed');
+    }
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function openDevice(itemId) {
+  // Fetch item to get URL and open in new tab
+  try {
+    const resp = await api('/api/results/0'); // dummy, we need item data
+    // Instead, get from the rendered data
+    const el = document.getElementById('item-' + itemId);
+    if (!el) return;
+    const ipEl = el.querySelector('.result-item-ip');
+    if (!ipEl) return;
+    const parts = ipEl.textContent.trim().split(':');
+    const ip = parts[0];
+    const port = parseInt(parts[1]) || 80;
+    const scheme = [443,8443,9443].includes(port) ? 'https' : 'http';
+    window.open(scheme + '://' + ip + ':' + port, '_blank');
+  } catch(e) {}
+}
+
+// ─────────── Init ───────────
+checkAuth();
+</script>
+</body>
+</html>
