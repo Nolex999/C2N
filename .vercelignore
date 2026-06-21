@@ -1,0 +1,6 @@
+bot.py
+proxies.json
+data.json
+*.exe
+README.md
+.git
