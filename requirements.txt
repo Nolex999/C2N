@@ -2,4 +2,4 @@ flask>=3.0
 requests>=2.31
 gunicorn>=21.2
 urllib3>=1.26
-firebase-admin>=6.2
+supabase>=2.0

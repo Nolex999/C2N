@@ -230,19 +230,12 @@ tr.open td { border-left:3px solid var(--orange); }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--gray-200); border-top-color:var(--gray-600); border-radius:50%; animation:spin .6s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 <script>
-const firebaseConfig = {
-  apiKey: "AIzaSyA0IMTr_DT6SRA1I5xKxhVfMaY-1xOqFUk",
-  authDomain: "getyourdevice.firebaseapp.com",
-  projectId: "getyourdevice",
-  storageBucket: "getyourdevice.firebasestorage.app",
-  messagingSenderId: "716409386995",
-  appId: "1:716409386995:web:a574074fb9da6b6fcb4486",
-  measurementId: "G-VWEM9479JG"
-};
-firebase.initializeApp(firebaseConfig);
+const supabase = supabase.createClient(
+  'https://fhlrvzhwjuepftwwnmtm.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M'
+);
 </script>
 </head>
 <body>
@@ -456,8 +449,8 @@ function showAuthSuccess(msg) {
 }
 
 async function getIdToken() {
-  const user = firebase.auth().currentUser;
-  return user ? await user.getIdToken() : null;
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.access_token || null;
 }
 
 async function doLogin(e) {
@@ -465,15 +458,16 @@ async function doLogin(e) {
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Logging in...';
   try {
-    const cred = await firebase.auth().signInWithEmailAndPassword(
-      document.getElementById('login-email').value,
-      document.getElementById('login-password').value
-    );
-    const idToken = await cred.user.getIdToken();
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+      email: document.getElementById('login-email').value,
+      password: document.getElementById('login-password').value
+    });
+    if (authError) { showAuthError(authError.message); return; }
+    const accessToken = authData.session.access_token;
     const resp = await fetch('/api/auth/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ id_token: idToken })
+      body: JSON.stringify({ access_token: accessToken })
     });
     const data = await resp.json();
     if (!resp.ok) { showAuthError(data.error); return; }
@@ -491,16 +485,18 @@ async function doRegister(e) {
   const btn = document.getElementById('reg-btn');
   btn.disabled = true; btn.textContent = 'Registering...';
   try {
-    const cred = await firebase.auth().createUserWithEmailAndPassword(
-      document.getElementById('reg-email').value,
-      document.getElementById('reg-password').value
-    );
-    const idToken = await cred.user.getIdToken();
+    const { data: authData, error: authError } = await supabase.auth.signUp({
+      email: document.getElementById('reg-email').value,
+      password: document.getElementById('reg-password').value
+    });
+    if (authError) { showAuthError(authError.message); return; }
+    const accessToken = authData.session?.access_token;
+    if (!accessToken) { showAuthError('Signup succeeded but no session. Check email for confirmation?'); return; }
     const resp = await fetch('/api/auth/register', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        id_token: idToken,
+        access_token: accessToken,
         invite_code: document.getElementById('reg-invite').value
       })
     });
@@ -517,7 +513,7 @@ async function doRegister(e) {
 
 async function doLogout() {
   localStorage.removeItem(TOKEN_KEY);
-  await firebase.auth().signOut();
+  await supabase.auth.signOut();
   document.getElementById('auth-screen').style.display = 'flex';
   document.getElementById('app-shell').classList.remove('active');
 }
@@ -536,16 +532,15 @@ async function checkAuth() {
   } catch(e) {}
 }
 
-// Listen for Firebase auth state changes
-firebase.auth().onAuthStateChanged(async (user) => {
-  if (user) {
+// Listen for Supabase auth state changes
+supabase.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'SIGNED_IN' && session) {
     const token = getToken();
     if (!token) {
-      const idToken = await user.getIdToken();
       const resp = await fetch('/api/auth/login', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ id_token: idToken })
+        body: JSON.stringify({ access_token: session.access_token })
       });
       if (resp.ok) {
         const data = await resp.json();
@@ -556,7 +551,7 @@ firebase.auth().onAuthStateChanged(async (user) => {
         loadOutputs();
       }
     }
-  } else if (!window.location.hash) {
+  } else if (event === 'SIGNED_OUT') {
     localStorage.removeItem(TOKEN_KEY);
   }
 });

