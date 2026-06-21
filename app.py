@@ -100,7 +100,7 @@ def api_register():
         existing = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
         if existing.data:
             return jsonify({"error": "user already registered"}), 409
-        supabase.table("users").insert({
+        supabase.table("users").upsert({
             "id": uid, "email": email, "username": username,
             "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()

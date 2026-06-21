@@ -230,12 +230,9 @@ tr.open td { border-left:3px solid var(--orange); }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--gray-200); border-top-color:var(--gray-600); border-radius:50%; animation:spin .6s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
-<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
 <script>
-const supabase = supabase.createClient(
-  'https://fhlrvzhwjuepftwwnmtm.supabase.co',
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M'
-);
+const SUPABASE_URL = 'https://fhlrvzhwjuepftwwnmtm.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M';
 </script>
 </head>
 <body>
@@ -414,8 +411,44 @@ const supabase = supabase.createClient(
 <script>
 // ─────────── Auth ───────────
 const TOKEN_KEY = 'gyd_token';
+const REFRESH_KEY = 'gyd_refresh';
 
 function getToken() { return localStorage.getItem(TOKEN_KEY); }
+
+function supabaseAuthHeaders() {
+  return { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' };
+}
+
+async function supabaseSignIn(email, password) {
+  const resp = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=password', {
+    method: 'POST', headers: supabaseAuthHeaders(),
+    body: JSON.stringify({ email, password })
+  });
+  return resp.json();
+}
+
+async function supabaseSignUp(email, password) {
+  const resp = await fetch(SUPABASE_URL + '/auth/v1/signup', {
+    method: 'POST', headers: supabaseAuthHeaders(),
+    body: JSON.stringify({ email, password })
+  });
+  return resp.json();
+}
+
+async function supabaseGetUser(accessToken) {
+  const resp = await fetch(SUPABASE_URL + '/auth/v1/user', {
+    headers: { ...supabaseAuthHeaders(), 'Authorization': 'Bearer ' + accessToken }
+  });
+  return resp.ok ? resp.json() : null;
+}
+
+async function supabaseRefresh(refreshToken) {
+  const resp = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
+    method: 'POST', headers: supabaseAuthHeaders(),
+    body: JSON.stringify({ refresh_token: refreshToken })
+  });
+  return resp.json();
+}
 
 async function api(url, opts = {}) {
   const token = getToken();
@@ -449,8 +482,19 @@ function showAuthSuccess(msg) {
 }
 
 async function getIdToken() {
-  const { data } = await supabase.auth.getSession();
-  return data?.session?.access_token || null;
+  let token = getToken();
+  if (!token) {
+    const rt = localStorage.getItem(REFRESH_KEY);
+    if (rt) {
+      const data = await supabaseRefresh(rt);
+      if (data.access_token) {
+        localStorage.setItem(TOKEN_KEY, data.access_token);
+        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
+        token = data.access_token;
+      }
+    }
+  }
+  return token;
 }
 
 async function doLogin(e) {
@@ -458,21 +502,22 @@ async function doLogin(e) {
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Logging in...';
   try {
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-      email: document.getElementById('login-email').value,
-      password: document.getElementById('login-password').value
-    });
-    if (authError) { showAuthError(authError.message); return; }
-    const accessToken = authData.session.access_token;
+    const data = await supabaseSignIn(
+      document.getElementById('login-email').value,
+      document.getElementById('login-password').value
+    );
+    if (data.error) { showAuthError(data.error_description || data.error); return; }
+    if (!data.access_token) { showAuthError('Login failed'); return; }
+    localStorage.setItem(TOKEN_KEY, data.access_token);
+    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
     const resp = await fetch('/api/auth/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ access_token: accessToken })
+      body: JSON.stringify({ access_token: data.access_token })
     });
-    const data = await resp.json();
-    if (!resp.ok) { showAuthError(data.error); return; }
-    localStorage.setItem(TOKEN_KEY, data.token);
-    document.getElementById('user-email').textContent = data.user.email;
+    const respData = await resp.json();
+    if (!resp.ok) { showAuthError(respData.error); return; }
+    document.getElementById('user-email').textContent = respData.user.email;
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app-shell').classList.add('active');
     loadOutputs();
@@ -485,25 +530,37 @@ async function doRegister(e) {
   const btn = document.getElementById('reg-btn');
   btn.disabled = true; btn.textContent = 'Registering...';
   try {
-    const { data: authData, error: authError } = await supabase.auth.signUp({
-      email: document.getElementById('reg-email').value,
-      password: document.getElementById('reg-password').value
-    });
-    if (authError) { showAuthError(authError.message); return; }
-    const accessToken = authData.session?.access_token;
-    if (!accessToken) { showAuthError('Signup succeeded but no session. Check email for confirmation?'); return; }
+    const data = await supabaseSignUp(
+      document.getElementById('reg-email').value,
+      document.getElementById('reg-password').value
+    );
+    if (data.error) { showAuthError(data.error_description || data.error); return; }
+    if (!data.access_token) {
+      // Email confirmation might be required — try signing in directly
+      const loginData = await supabaseSignIn(
+        document.getElementById('reg-email').value,
+        document.getElementById('reg-password').value
+      );
+      if (loginData.error || !loginData.access_token) {
+        showAuthError('Signup succeeded but no session. Check email for confirmation or disable email confirm in Supabase settings.');
+        return;
+      }
+      data.access_token = loginData.access_token;
+      data.refresh_token = loginData.refresh_token;
+    }
+    localStorage.setItem(TOKEN_KEY, data.access_token);
+    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
     const resp = await fetch('/api/auth/register', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        access_token: accessToken,
+        access_token: data.access_token,
         invite_code: document.getElementById('reg-invite').value
       })
     });
-    const data = await resp.json();
-    if (!resp.ok) { showAuthError(data.error); return; }
-    localStorage.setItem(TOKEN_KEY, data.token);
-    document.getElementById('user-email').textContent = data.user.email;
+    const respData = await resp.json();
+    if (!resp.ok) { showAuthError(respData.error); return; }
+    document.getElementById('user-email').textContent = respData.user.email;
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app-shell').classList.add('active');
     loadOutputs();
@@ -513,17 +570,26 @@ async function doRegister(e) {
 
 async function doLogout() {
   localStorage.removeItem(TOKEN_KEY);
-  await supabase.auth.signOut();
+  localStorage.removeItem(REFRESH_KEY);
   document.getElementById('auth-screen').style.display = 'flex';
   document.getElementById('app-shell').classList.remove('active');
 }
 
 async function checkAuth() {
   const token = getToken();
-  if (!token) return;
+  if (!token) {
+    const rt = localStorage.getItem(REFRESH_KEY);
+    if (!rt) return;
+    const refreshData = await supabaseRefresh(rt);
+    if (!refreshData.access_token) { localStorage.removeItem(REFRESH_KEY); return; }
+    localStorage.setItem(TOKEN_KEY, refreshData.access_token);
+    if (refreshData.refresh_token) localStorage.setItem(REFRESH_KEY, refreshData.refresh_token);
+  }
+  const accessToken = getToken();
+  if (!accessToken) return;
   try {
-    const resp = await fetch('/api/auth/me', { headers: {'Authorization': 'Bearer ' + token} });
-    if (!resp.ok) { localStorage.removeItem(TOKEN_KEY); return; }
+    const resp = await fetch('/api/auth/me', { headers: {'Authorization': 'Bearer ' + accessToken} });
+    if (!resp.ok) { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(REFRESH_KEY); return; }
     const data = await resp.json();
     document.getElementById('user-email').textContent = data.user.email;
     document.getElementById('auth-screen').style.display = 'none';
@@ -531,30 +597,6 @@ async function checkAuth() {
     loadOutputs();
   } catch(e) {}
 }
-
-// Listen for Supabase auth state changes
-supabase.auth.onAuthStateChange(async (event, session) => {
-  if (event === 'SIGNED_IN' && session) {
-    const token = getToken();
-    if (!token) {
-      const resp = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ access_token: session.access_token })
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        localStorage.setItem(TOKEN_KEY, data.token);
-        document.getElementById('user-email').textContent = data.user.email;
-        document.getElementById('auth-screen').style.display = 'none';
-        document.getElementById('app-shell').classList.add('active');
-        loadOutputs();
-      }
-    }
-  } else if (event === 'SIGNED_OUT') {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-});
 
 // ─────────── Tabs ───────────
 function switchTab(name) {

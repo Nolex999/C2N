@@ -109,6 +109,7 @@ CREATE INDEX idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
 
 -- Users: each user can read their own record
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "users_insert_own" ON users FOR INSERT WITH CHECK (id = auth.uid());
 CREATE POLICY "users_select_own" ON users FOR SELECT USING (id = auth.uid());
 CREATE POLICY "users_update_own" ON users FOR UPDATE USING (id = auth.uid());
 
