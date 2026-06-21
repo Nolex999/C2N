@@ -67,74 +67,112 @@ def require_auth(f):
     return wrapper
 
 # ─────────────── Auth routes ───────────────
+# Frontend sends email+password, backend handles Supabase Auth
+
+SUPABASE_AUTH_URL = SUPABASE_URL + "/auth/v1"
+
+def supabase_request(method, path, data=None, use_service_role=False):
+    url = SUPABASE_AUTH_URL + path
+    headers = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
+    if use_service_role and SUPABASE_SERVICE_ROLE_KEY:
+        headers["Authorization"] = "Bearer " + SUPABASE_SERVICE_ROLE_KEY
+    r = requests.request(method, url, headers=headers, json=data, timeout=15)
+    return r.json() if r.status_code < 500 else {"error": "server error"}
+
+def supabase_sign_in(email, password):
+    return supabase_request("POST", "/token?grant_type=password", {
+        "email": email, "password": password
+    })
+
+def supabase_admin_create_user(email, password):
+    return supabase_request("POST", "/admin/users", {
+        "email": email, "password": password, "email_confirm": True
+    }, use_service_role=True)
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
     body = request.get_json(force=True)
-    token = body.get("access_token", "")
-    if not token:
-        return jsonify({"error": "access_token required"}), 400
-    user = verify_token(token)
-    if not user:
-        return jsonify({"error": "invalid token"}), 401
-    uid = user.id
-    email = user.email or ""
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+
+    data = supabase_sign_in(email, password)
+    if data.get("error"):
+        return jsonify({"error": data.get("error_description") or data.get("error")}), 401
+    access_token = data.get("access_token", "")
+    if not access_token:
+        return jsonify({"error": "login failed"}), 401
+
+    uid = data.get("user", {}).get("id", "")
     username = email.split("@")[0]
     ensure_user(uid, email)
     try:
-        resp = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
-        if resp.data:
-            username = resp.data[0].get("username", username)
-            email = resp.data[0].get("email", email)
+        if supabase:
+            resp = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
+            if resp.data:
+                username = resp.data[0].get("username", username)
     except:
         pass
-    return jsonify({"status": "ok", "token": token, "user": {"email": email, "username": username, "uid": uid}})
+    return jsonify({"status": "ok", "token": access_token, "user": {"email": email, "username": username, "uid": uid}})
 
 @app.route("/api/auth/register", methods=["POST"])
 def api_register():
     body = request.get_json(force=True)
+    email = body.get("email", "").strip().lower()
+    password = body.get("password", "")
     invite = body.get("invite_code", "").strip()
-    token = body.get("access_token", "")
+    username = body.get("username", email.split("@")[0])
 
-    if not token:
-        return jsonify({"error": "access_token required"}), 400
-
-    user = verify_token(token)
-    if not user:
-        return jsonify({"error": "invalid token"}), 401
-
-    uid = user.id
-    email = user.email or ""
-    username = email.split("@")[0]
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+    if len(password) < 6:
+        return jsonify({"error": "password must be 6+ characters"}), 400
 
     if INVITE_ONLY:
         if not invite:
             return jsonify({"error": "invitation code required"}), 400
+        if supabase:
+            try:
+                inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
+                if not inv.data:
+                    return jsonify({"error": "invalid or used invitation code"}), 400
+            except Exception as e:
+                return jsonify({"error": f"invite check failed: {e}"}), 500
+
+    user_data = supabase_admin_create_user(email, password)
+    if user_data.get("error"):
+        return jsonify({"error": f"registration failed: {user_data.get('error')}"}), 500
+
+    uid = user_data.get("id", "")
+    if not uid:
+        return jsonify({"error": "registration failed: no uid"}), 500
+
+    if supabase:
         try:
-            inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
-            if not inv.data:
-                return jsonify({"error": "invalid or used invitation code"}), 400
+            supabase.table("users").upsert({
+                "id": uid, "email": email, "username": username,
+                "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
         except Exception as e:
-            return jsonify({"error": f"invite check failed: {e}"}), 500
+            pass  # non-critical
 
-    try:
-        existing = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
-        if existing.data:
-            return jsonify({"error": "user already registered"}), 409
-        supabase.table("users").upsert({
-            "id": uid, "email": email, "username": username,
-            "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
-    except Exception as e:
-        return jsonify({"error": f"user creation failed: {e}"}), 500
+        if INVITE_ONLY and invite:
+            try:
+                inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
+                if inv.data:
+                    inv_id = inv.data[0]["id"]
+                    supabase.table("invite_codes").update({
+                        "status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", inv_id).execute()
+            except:
+                pass
 
-    if INVITE_ONLY and invite and inv.data:
-        inv_id = inv.data[0]["id"]
-        supabase.table("invite_codes").update({
-            "status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()
-        }).eq("id", inv_id).execute()
+    # Get JWT for the new user
+    signin = supabase_sign_in(email, password)
+    access_token = signin.get("access_token", "")
 
-    return jsonify({"status": "ok", "token": token, "user": {"email": email, "username": username, "uid": uid}})
+    return jsonify({"status": "ok", "token": access_token, "user": {"email": email, "username": username, "uid": uid}})
 
 @app.route("/api/auth/me", methods=["GET"])
 @require_auth

@@ -230,10 +230,6 @@ tr.open td { border-left:3px solid var(--orange); }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--gray-200); border-top-color:var(--gray-600); border-radius:50%; animation:spin .6s linear infinite; }
 @keyframes spin { to { transform:rotate(360deg); } }
 </style>
-<script>
-const SUPABASE_URL = 'https://fhlrvzhwjuepftwwnmtm.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M';
-</script>
 </head>
 <body>
 
@@ -415,40 +411,7 @@ const REFRESH_KEY = 'gyd_refresh';
 
 function getToken() { return localStorage.getItem(TOKEN_KEY); }
 
-function supabaseAuthHeaders() {
-  return { 'apikey': SUPABASE_ANON_KEY, 'Content-Type': 'application/json' };
-}
-
-async function supabaseSignIn(email, password) {
-  const resp = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=password', {
-    method: 'POST', headers: supabaseAuthHeaders(),
-    body: JSON.stringify({ email, password })
-  });
-  return resp.json();
-}
-
-async function supabaseSignUp(email, password) {
-  const resp = await fetch(SUPABASE_URL + '/auth/v1/signup', {
-    method: 'POST', headers: supabaseAuthHeaders(),
-    body: JSON.stringify({ email, password })
-  });
-  return resp.json();
-}
-
-async function supabaseGetUser(accessToken) {
-  const resp = await fetch(SUPABASE_URL + '/auth/v1/user', {
-    headers: { ...supabaseAuthHeaders(), 'Authorization': 'Bearer ' + accessToken }
-  });
-  return resp.ok ? resp.json() : null;
-}
-
-async function supabaseRefresh(refreshToken) {
-  const resp = await fetch(SUPABASE_URL + '/auth/v1/token?grant_type=refresh_token', {
-    method: 'POST', headers: supabaseAuthHeaders(),
-    body: JSON.stringify({ refresh_token: refreshToken })
-  });
-  return resp.json();
-}
+async function getIdToken() { return getToken(); }
 
 async function api(url, opts = {}) {
   const token = getToken();
@@ -481,43 +444,23 @@ function showAuthSuccess(msg) {
   el.textContent = msg; el.style.display = 'block';
 }
 
-async function getIdToken() {
-  let token = getToken();
-  if (!token) {
-    const rt = localStorage.getItem(REFRESH_KEY);
-    if (rt) {
-      const data = await supabaseRefresh(rt);
-      if (data.access_token) {
-        localStorage.setItem(TOKEN_KEY, data.access_token);
-        if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
-        token = data.access_token;
-      }
-    }
-  }
-  return token;
-}
-
 async function doLogin(e) {
   e.preventDefault();
   const btn = document.getElementById('login-btn');
   btn.disabled = true; btn.textContent = 'Logging in...';
   try {
-    const data = await supabaseSignIn(
-      document.getElementById('login-email').value,
-      document.getElementById('login-password').value
-    );
-    if (data.error) { showAuthError(data.error_description || data.error); return; }
-    if (!data.access_token) { showAuthError('Login failed'); return; }
-    localStorage.setItem(TOKEN_KEY, data.access_token);
-    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
     const resp = await fetch('/api/auth/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ access_token: data.access_token })
+      body: JSON.stringify({
+        email: document.getElementById('login-email').value,
+        password: document.getElementById('login-password').value
+      })
     });
-    const respData = await resp.json();
-    if (!resp.ok) { showAuthError(respData.error); return; }
-    document.getElementById('user-email').textContent = respData.user.email;
+    const data = await resp.json();
+    if (!resp.ok) { showAuthError(data.error); return; }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    document.getElementById('user-email').textContent = data.user.email;
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app-shell').classList.add('active');
     loadOutputs();
@@ -530,38 +473,19 @@ async function doRegister(e) {
   const btn = document.getElementById('reg-btn');
   btn.disabled = true; btn.textContent = 'Registering...';
   try {
-    const email = document.getElementById('reg-email').value;
-    const password = document.getElementById('reg-password').value;
-    // Try signup
-    const data = await supabaseSignUp(email, password);
-    if (data.error && !data.id) {
-      showAuthError('Signup error: ' + (data.error_description || data.error || data.msg || 'unknown'));
-      return;
-    }
-    // If no session, try signing in directly
-    if (!data.access_token) {
-      const loginData = await supabaseSignIn(email, password);
-      if (loginData.error || !loginData.access_token) {
-        const errMsg = loginData.error_description || loginData.error || loginData.msg || 'unknown';
-        showAuthError('Signup: ' + errMsg + '. If user already exists, try Login tab.');
-        return;
-      }
-      data.access_token = loginData.access_token;
-      data.refresh_token = loginData.refresh_token;
-    }
-    localStorage.setItem(TOKEN_KEY, data.access_token);
-    if (data.refresh_token) localStorage.setItem(REFRESH_KEY, data.refresh_token);
     const resp = await fetch('/api/auth/register', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
-        access_token: data.access_token,
+        email: document.getElementById('reg-email').value,
+        password: document.getElementById('reg-password').value,
         invite_code: document.getElementById('reg-invite').value
       })
     });
-    const respData = await resp.json();
-    if (!resp.ok) { showAuthError(respData.error); return; }
-    document.getElementById('user-email').textContent = respData.user.email;
+    const data = await resp.json();
+    if (!resp.ok) { showAuthError(data.error); return; }
+    localStorage.setItem(TOKEN_KEY, data.token);
+    document.getElementById('user-email').textContent = data.user.email;
     document.getElementById('auth-screen').style.display = 'none';
     document.getElementById('app-shell').classList.add('active');
     loadOutputs();
@@ -571,26 +495,16 @@ async function doRegister(e) {
 
 async function doLogout() {
   localStorage.removeItem(TOKEN_KEY);
-  localStorage.removeItem(REFRESH_KEY);
   document.getElementById('auth-screen').style.display = 'flex';
   document.getElementById('app-shell').classList.remove('active');
 }
 
 async function checkAuth() {
   const token = getToken();
-  if (!token) {
-    const rt = localStorage.getItem(REFRESH_KEY);
-    if (!rt) return;
-    const refreshData = await supabaseRefresh(rt);
-    if (!refreshData.access_token) { localStorage.removeItem(REFRESH_KEY); return; }
-    localStorage.setItem(TOKEN_KEY, refreshData.access_token);
-    if (refreshData.refresh_token) localStorage.setItem(REFRESH_KEY, refreshData.refresh_token);
-  }
-  const accessToken = getToken();
-  if (!accessToken) return;
+  if (!token) return;
   try {
-    const resp = await fetch('/api/auth/me', { headers: {'Authorization': 'Bearer ' + accessToken} });
-    if (!resp.ok) { localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(REFRESH_KEY); return; }
+    const resp = await fetch('/api/auth/me', { headers: {'Authorization': 'Bearer ' + token} });
+    if (!resp.ok) { localStorage.removeItem(TOKEN_KEY); return; }
     const data = await resp.json();
     document.getElementById('user-email').textContent = data.user.email;
     document.getElementById('auth-screen').style.display = 'none';
