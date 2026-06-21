@@ -2,8 +2,10 @@ import os, json, uuid
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify
+from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fhlrvzhwjuepftwwnmtm.supabase.co")
