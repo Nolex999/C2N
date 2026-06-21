@@ -530,19 +530,20 @@ async function doRegister(e) {
   const btn = document.getElementById('reg-btn');
   btn.disabled = true; btn.textContent = 'Registering...';
   try {
-    const data = await supabaseSignUp(
-      document.getElementById('reg-email').value,
-      document.getElementById('reg-password').value
-    );
-    if (data.error) { showAuthError(data.error_description || data.error); return; }
+    const email = document.getElementById('reg-email').value;
+    const password = document.getElementById('reg-password').value;
+    // Try signup
+    const data = await supabaseSignUp(email, password);
+    if (data.error && !data.id) {
+      showAuthError('Signup error: ' + (data.error_description || data.error || data.msg || 'unknown'));
+      return;
+    }
+    // If no session, try signing in directly
     if (!data.access_token) {
-      // Email confirmation might be required — try signing in directly
-      const loginData = await supabaseSignIn(
-        document.getElementById('reg-email').value,
-        document.getElementById('reg-password').value
-      );
+      const loginData = await supabaseSignIn(email, password);
       if (loginData.error || !loginData.access_token) {
-        showAuthError('Signup succeeded but no session. Check email for confirmation or disable email confirm in Supabase settings.');
+        const errMsg = loginData.error_description || loginData.error || loginData.msg || 'unknown';
+        showAuthError('Signup: ' + errMsg + '. If user already exists, try Login tab.');
         return;
       }
       data.access_token = loginData.access_token;
