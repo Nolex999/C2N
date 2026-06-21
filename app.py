@@ -10,11 +10,14 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fhlrvzhwjuepftwwnmtm.supa
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+use_service_role = bool(SUPABASE_SERVICE_ROLE_KEY)
+supabase_key = SUPABASE_SERVICE_ROLE_KEY if use_service_role else SUPABASE_ANON_KEY
+
 supabase = None
-if SUPABASE_URL and SUPABASE_ANON_KEY:
+if SUPABASE_URL and supabase_key:
     from supabase import create_client
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
+        supabase = create_client(SUPABASE_URL, supabase_key)
     except Exception as e:
         print(f"[!] Supabase init error: {e}")
 
@@ -31,6 +34,20 @@ def verify_token(token):
         return resp.user
     except:
         return None
+
+def ensure_user(uid, email):
+    """Create public.users row if missing (backup for trigger)."""
+    if not supabase:
+        return
+    try:
+        existing = supabase.table("users").select("id").eq("id", uid).limit(1).execute()
+        if not existing.data:
+            username = email.split("@")[0] if email else uid[:8]
+            supabase.table("users").insert({
+                "id": uid, "email": email, "username": username,
+            }).execute()
+    except:
+        pass
 
 def get_user_by_token():
     auth_h = request.headers.get("Authorization", "")
@@ -61,10 +78,12 @@ def api_login():
     uid = user.id
     email = user.email or ""
     username = email.split("@")[0]
+    ensure_user(uid, email)
     try:
         resp = supabase.table("users").select("*").eq("id", uid).limit(1).execute()
         if resp.data:
             username = resp.data[0].get("username", username)
+            email = resp.data[0].get("email", email)
     except:
         pass
     return jsonify({"status": "ok", "token": token, "user": {"email": email, "username": username, "uid": uid}})
