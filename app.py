@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
-app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'))
+app = Flask(__name__, static_folder=os.path.join(BASE_DIR, 'frontend', 'dist'), static_url_path='')
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://fhlrvzhwjuepftwwnmtm.supabase.co")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZobHJ2emh3anVlcGZ0d3dubXRtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwNzIwNTcsImV4cCI6MjA5NzY0ODA1N30.8J9W654hvfn3oFHdv4M0yyeQeyWUOWuTEM6Dw6Ri5-M")
@@ -465,11 +465,15 @@ def api_create_invite(user):
 
 @app.route("/")
 def index():
-    return render_template("app.html")
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, 'index.html')):
+        return app.send_static_file('index.html')
+    return "Frontend not built. Please run 'npm run build-all' in the root directory.", 404
 
 @app.route("/app")
 def app_spa():
-    return render_template("app.html")
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, 'index.html')):
+        return app.send_static_file('index.html')
+    return "Frontend not built. Please run 'npm run build-all' in the root directory.", 404
 
 @app.route("/api/health")
 def api_health():
