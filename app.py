@@ -1,4 +1,4 @@
-import os, json, uuid, requests
+import os, json, uuid
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify
@@ -69,34 +69,6 @@ def require_auth(f):
 # ─────────────── Auth routes ───────────────
 # Frontend sends email+password, backend handles Supabase Auth
 
-SUPABASE_AUTH_URL = SUPABASE_URL + "/auth/v1"
-
-def supabase_request(method, path, data=None, use_service_role=False):
-    url = SUPABASE_AUTH_URL + path
-    headers = {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
-    if use_service_role and SUPABASE_SERVICE_ROLE_KEY:
-        headers["Authorization"] = "Bearer " + SUPABASE_SERVICE_ROLE_KEY
-    r = requests.request(method, url, headers=headers, json=data, timeout=15)
-    print(f"[supabase] {method} {path} -> {r.status_code} {r.text[:500]}")
-    try:
-        body = r.json()
-    except Exception as e:
-        print(f"[supabase] json parse error: {e}")
-        return {"error": f"supabase returned non-JSON ({r.status_code}): {r.text[:200]}"}
-    if r.status_code >= 400:
-        err = body.get("error_description") or body.get("error") or body.get("message") or r.text[:200]
-        return {"error": f"supabase {r.status_code}: {err}"}
-    return body
-
-def supabase_sign_in(email, password):
-    return supabase_request("POST", "/token?grant_type=password", {
-        "email": email, "password": password
-    })
-
-def supabase_admin_create_user(email, password):
-    return supabase_request("POST", "/admin/users", {
-        "email": email, "password": password, "email_confirm": True
-    }, use_service_role=True)
 
 @app.route("/api/auth/login", methods=["POST"])
 def api_login():
@@ -106,14 +78,17 @@ def api_login():
     if not email or not password:
         return jsonify({"error": "email and password required"}), 400
 
-    data = supabase_sign_in(email, password)
-    if data.get("error"):
-        return jsonify({"error": data.get("error_description") or data.get("error")}), 401
-    access_token = data.get("access_token", "")
-    if not access_token:
-        return jsonify({"error": "login failed"}), 401
+    try:
+        signin = supabase.auth.sign_in_with_password({"email": email, "password": password})
+    except Exception as e:
+        print(f"[auth] login error: {e}")
+        return jsonify({"error": f"login failed: {e}"}), 401
 
-    uid = data.get("user", {}).get("id", "")
+    if not signin.session:
+        return jsonify({"error": "login failed: no session"}), 401
+
+    access_token = signin.session.access_token
+    uid = signin.user.id if signin.user else ""
     username = email.split("@")[0]
     ensure_user(uid, email)
     try:
@@ -149,37 +124,46 @@ def api_register():
             except Exception as e:
                 return jsonify({"error": f"invite check failed: {e}"}), 500
 
-    user_data = supabase_admin_create_user(email, password)
-    if user_data.get("error"):
-        return jsonify({"error": f"registration failed: {user_data.get('error')}"}), 500
+    if not supabase:
+        return jsonify({"error": "registration failed: no database connection"}), 500
 
-    uid = user_data.get("id", "")
+    try:
+        signup = supabase.auth.sign_up({"email": email, "password": password})
+    except Exception as e:
+        print(f"[auth] sign_up error: {e}")
+        return jsonify({"error": f"registration failed: {e}"}), 500
+
+    uid = signup.user.id if signup.user else ""
     if not uid:
-        return jsonify({"error": "registration failed: no uid"}), 500
+        return jsonify({"error": "registration failed: no uid returned"}), 500
 
-    if supabase:
+    try:
+        supabase.table("users").upsert({
+            "id": uid, "email": email, "username": username,
+            "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception as e:
+        print(f"[db] upsert user warning: {e}")
+
+    if INVITE_ONLY and invite:
         try:
-            supabase.table("users").upsert({
-                "id": uid, "email": email, "username": username,
-                "avatar_url": "", "bio": "", "created_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
+            inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
+            if inv.data:
+                inv_id = inv.data[0]["id"]
+                supabase.table("invite_codes").update({
+                    "status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", inv_id).execute()
         except Exception as e:
-            pass  # non-critical
+            print(f"[db] invite update warning: {e}")
 
-        if INVITE_ONLY and invite:
-            try:
-                inv = supabase.table("invite_codes").select("*").eq("code", invite).eq("status", "active").limit(1).execute()
-                if inv.data:
-                    inv_id = inv.data[0]["id"]
-                    supabase.table("invite_codes").update({
-                        "status": "used", "used_by": uid, "used_at": datetime.now(timezone.utc).isoformat()
-                    }).eq("id", inv_id).execute()
-            except:
-                pass
-
-    # Get JWT for the new user
-    signin = supabase_sign_in(email, password)
-    access_token = signin.get("access_token", "")
+    # Get JWT — sign_up may return session if auto-confirmed, otherwise sign in manually
+    access_token = signup.session.access_token if signup.session else ""
+    if not access_token:
+        try:
+            signin = supabase.auth.sign_in_with_password({"email": email, "password": password})
+            access_token = signin.session.access_token if signin.session else ""
+        except Exception as e:
+            print(f"[auth] sign_in after register error: {e}")
 
     return jsonify({"status": "ok", "token": access_token, "user": {"email": email, "username": username, "uid": uid}})
 
