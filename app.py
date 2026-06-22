@@ -1,4 +1,4 @@
-import os, json, uuid
+import os, json, uuid, requests
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify
