@@ -77,7 +77,16 @@ def supabase_request(method, path, data=None, use_service_role=False):
     if use_service_role and SUPABASE_SERVICE_ROLE_KEY:
         headers["Authorization"] = "Bearer " + SUPABASE_SERVICE_ROLE_KEY
     r = requests.request(method, url, headers=headers, json=data, timeout=15)
-    return r.json() if r.status_code < 500 else {"error": "server error"}
+    print(f"[supabase] {method} {path} -> {r.status_code} {r.text[:500]}")
+    try:
+        body = r.json()
+    except Exception as e:
+        print(f"[supabase] json parse error: {e}")
+        return {"error": f"supabase returned non-JSON ({r.status_code}): {r.text[:200]}"}
+    if r.status_code >= 400:
+        err = body.get("error_description") or body.get("error") or body.get("message") or r.text[:200]
+        return {"error": f"supabase {r.status_code}: {err}"}
+    return body
 
 def supabase_sign_in(email, password):
     return supabase_request("POST", "/token?grant_type=password", {
