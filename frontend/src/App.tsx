@@ -62,12 +62,14 @@ export default function App() {
 
   // Scan state
   const [scanning, setScanning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [totalScanned, setTotalScanned] = useState(0);
   const [totalResponded, setTotalResponded] = useState(0);
   const [scanResults, setScanResults] = useState<ScanResultItem[]>([]);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [elapsed, setElapsed] = useState('0:00');
   const stoppedRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<any>(null);
   const startRef = useRef<number | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -209,7 +211,11 @@ export default function App() {
     if (region === 'internet') body.internet = true;
     else body.region = region;
     if (countryFilter.trim()) body.country = countryFilter.trim();
-    const r = await apiFetch('/api/scan', { method: 'POST', body: JSON.stringify(body) });
+    const r = await apiFetch('/api/scan', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal: abortRef.current?.signal,
+    });
     if (!r.ok) throw new Error('Scan request failed');
     return r.json();
   };
@@ -217,7 +223,9 @@ export default function App() {
   const startScan = async () => {
     if (scanning) return;
     setScanning(true);
+    setStopping(false);
     stoppedRef.current = false;
+    abortRef.current = new AbortController();
     setTotalScanned(0);
     setTotalResponded(0);
     setScanResults([]);
@@ -249,6 +257,8 @@ export default function App() {
           setScanResults([...acc]);
         }
       } catch (err: any) {
+        // AbortError = user clicked Stop — exit cleanly, no retry
+        if (err.name === 'AbortError') { addLog('Scan aborted.', 'info'); break; }
         addLog(`Batch error: ${err.message}. Retrying…`, 'err');
         await new Promise(res => setTimeout(res, 2000));
         try {
@@ -258,12 +268,18 @@ export default function App() {
             if (d.results) { acc.push(...d.results); setScanResults([...acc]); }
             addLog('Retry OK', 'info');
           }
-        } catch (e2: any) { addLog(`Retry failed: ${e2.message}`, 'err'); scanned += size; setTotalScanned(scanned); }
+        } catch (e2: any) {
+          if (e2.name === 'AbortError') { addLog('Scan aborted.', 'info'); break; }
+          addLog(`Retry failed: ${e2.message}`, 'err');
+          scanned += size;
+          setTotalScanned(scanned);
+        }
       }
       if (i < batches - 1 && !stoppedRef.current) await new Promise(res => setTimeout(res, 300));
     }
 
     setScanning(false);
+    setStopping(false);
     clearInterval(timerRef.current);
     if (!stoppedRef.current) {
       addLog(`Scan complete — ${acc.length} results from ${scanned} IPs`, 'info');
@@ -271,7 +287,13 @@ export default function App() {
     }
   };
 
-  const stopScan = () => { stoppedRef.current = true; addLog('Stopping…', 'info'); };
+  const stopScan = () => {
+    if (stoppedRef.current) return; // prevent duplicate calls
+    stoppedRef.current = true;
+    setStopping(true);
+    abortRef.current?.abort(); // cancel the in-flight HTTP request immediately
+    addLog('Stopping…', 'info');
+  };
 
   const clearScan = () => {
     if (scanning) return;
