@@ -512,8 +512,8 @@ select.field-input { cursor: pointer; }
 
 /* ─── Log Console ─── */
 .log-box {
-  background: #0d1117;
-  border: 1px solid #30363d;
+  background: var(--gray-100);
+  border: 1px solid var(--gray-300);
   border-radius: var(--radius-sm);
   height: 180px;
   overflow-y: auto;
@@ -526,12 +526,12 @@ select.field-input { cursor: pointer; }
   gap: 3px;
 }
 
-.log-line { color: #8b949e; line-height: 1.5; }
-.log-line .ts { color: #484f58; margin-right: 7px; }
-.log-line.hit { color: #3fb950; }
-.log-line.hit-open { color: #d29922; }
-.log-line.err { color: #f85149; }
-.log-line.info { color: #58a6ff; }
+.log-line { color: var(--gray-700); line-height: 1.5; }
+.log-line .ts { color: var(--gray-400); margin-right: 7px; }
+.log-line.hit { color: var(--green); }
+.log-line.hit-open { color: var(--orange); }
+.log-line.err { color: var(--red); }
+.log-line.info { color: var(--blue); }
 
 /* ─── Table ─── */
 .table-wrap {
