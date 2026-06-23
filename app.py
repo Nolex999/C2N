@@ -531,7 +531,11 @@ def api_scan_stream(user):
         sw.start()
 
         while True:
-            evt_type, data = event_queue.get()
+            try:
+                evt_type, data = event_queue.get(timeout=10)
+            except queue.Empty:
+                yield f"event: ping\ndata: {json.dumps({'t': time.time()})}\n\n"
+                continue
             if evt_type == "_done":
                 break
             if evt_type == "ping":
