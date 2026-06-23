@@ -206,6 +206,20 @@ export default function App() {
     }
   };
 
+  const runChunk = async (size: number) => {
+    const body: any = { max_ips: size, threads, ports, geo: geoEnrich };
+    if (region === 'internet') body.internet = true;
+    else body.region = region;
+    if (countryFilter.trim()) body.country = countryFilter.trim();
+    const r = await apiFetch('/api/scan', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal: abortRef.current?.signal,
+    });
+    if (!r.ok) throw new Error('Scan request failed');
+    return r.json();
+  };
+
   const startScan = async () => {
     if (scanning) return;
     setScanning(true);
@@ -220,77 +234,56 @@ export default function App() {
     setElapsed('0:00');
     timerRef.current = setInterval(tickTimer, 1000);
 
-    const body: any = { max_ips: maxIps, threads, ports, geo: geoEnrich };
-    if (region === 'internet') body.internet = true;
-    else body.region = region;
-    if (countryFilter.trim()) body.country = countryFilter.trim();
+    const batches = Math.ceil(maxIps / batchSize);
+    addLog(`Starting scan — ${maxIps} targets, ${batches} batches`, 'info');
+    let scanned = 0;
+    const acc: ScanResultItem[] = [];
 
-    addLog(`Starting scan — ${maxIps} targets (streaming)`, 'info');
-
-    try {
-      const response = await apiFetch('/api/scan/stream', {
-        method: 'POST',
-        body: JSON.stringify(body),
-        signal: abortRef.current?.signal,
-      });
-      if (!response.ok) { addLog('Scan request failed', 'err'); return; }
-
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let eventType = '';
-      let dataStr = '';
-
-      const flushEvent = () => {
-        if (!dataStr) return;
+    for (let i = 0; i < batches; i++) {
+      if (stoppedRef.current) { addLog('Scan stopped.', 'info'); break; }
+      const size = Math.min(batchSize, maxIps - scanned);
+      addLog(`Batch ${i + 1}/${batches} — ${size} IPs`, 'info');
+      try {
+        const d = await runChunk(size);
+        scanned += d.total_scanned || size;
+        setTotalScanned(scanned);
+        setTotalResponded(p => p + (d.results_count || 0));
+        if (d.results) {
+          d.results.forEach((r: ScanResultItem) => {
+            acc.push(r);
+            if (r.auth_found) addLog(`Found: ${r.url} — ${r.username}:${r.password} [${r.device}]`, 'hit');
+            else if (r.no_auth) addLog(`Open: ${r.url} [${r.device}]`, 'hit-open');
+          });
+          setScanResults([...acc]);
+        }
+      } catch (err: any) {
+        if (err.name === 'AbortError') { addLog('Scan aborted.', 'info'); break; }
+        addLog(`Batch error: ${err.message}. Retrying…`, 'err');
+        await new Promise(res => setTimeout(res, 2000));
         try {
-          const data = JSON.parse(dataStr);
-          if (eventType === 'start') {
-            setTotalScanned(0);
-          } else if (eventType === 'hit') {
-            const results: ScanResultItem[] = data.results || [];
-            setTotalResponded(p => p + results.length);
-            setScanResults(prev => {
-              const updated = [...prev, ...results];
-              return updated;
-            });
-            results.forEach((r: ScanResultItem) => {
-              if (r.auth_found) addLog(`Found: ${r.url} — ${r.username}:${r.password} [${r.device}]`, 'hit');
-              else if (r.no_auth) addLog(`Open: ${r.url} [${r.device}]`, 'hit-open');
-            });
-          } else if (eventType === 'progress') {
-            setTotalScanned(data.scanned);
-          } else if (eventType === 'done') {
-            addLog(`Scan complete — ${data.results_count} results from ${data.total_scanned} IPs`, 'info');
-            toast(`Scan complete: ${data.results_count} results`, 'success');
+          if (!stoppedRef.current) {
+            const d = await runChunk(size);
+            scanned += d.total_scanned || size;
+            if (d.results) { acc.push(...d.results); setScanResults([...acc]); }
+            addLog('Retry OK', 'info');
           }
-        } catch (e) { /* parse error, skip */ }
-        dataStr = '';
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) { flushEvent(); break; }
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n');
-        buffer = parts.pop() || '';
-        for (const line of parts) {
-          if (line.startsWith('event: ')) {
-            flushEvent();
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            dataStr = line.slice(6);
-          }
+        } catch (e2: any) {
+          if (e2.name === 'AbortError') { addLog('Scan aborted.', 'info'); break; }
+          addLog(`Retry failed: ${e2.message}`, 'err');
+          scanned += size;
+          setTotalScanned(scanned);
         }
       }
-    } catch (err: any) {
-      if (err.name === 'AbortError') { addLog('Scan aborted.', 'info'); }
-      else { addLog(`Scan error: ${err.message}`, 'err'); }
+      if (i < batches - 1 && !stoppedRef.current) await new Promise(res => setTimeout(res, 300));
     }
 
     setScanning(false);
     setStopping(false);
     clearInterval(timerRef.current);
+    if (!stoppedRef.current) {
+      addLog(`Scan complete — ${acc.length} results from ${scanned} IPs`, 'info');
+      toast(`Scan complete: ${acc.length} results`, 'success');
+    }
   };
 
   const stopScan = () => {
@@ -572,6 +565,15 @@ export default function App() {
                     <option value="latin-america">Latin America (LACNIC)</option>
                     <option value="africa">Africa (AFRINIC)</option>
                     <option value="subsaharan">Sub-Saharan Africa</option>
+                    <option value="india">India</option>
+                    <option value="middle-east">Middle East</option>
+                    <option value="oceania">Oceania</option>
+                    <option value="southeast-asia">Southeast Asia</option>
+                    <option value="east-asia">East Asia</option>
+                    <option value="central-asia">Central Asia</option>
+                    <option value="nordics">Nordics</option>
+                    <option value="eastern-europe">Eastern Europe</option>
+                    <option value="south-america">South America</option>
                     <option value="internet">Random Internet</option>
                   </select>
                 </div>

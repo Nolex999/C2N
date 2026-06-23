@@ -1141,6 +1141,15 @@ REGION_CONFIG = {
     "worldwide": {"rirs": ["afrinic", "ripe", "arin", "apnic", "lacnic"], "label": "Worldwide", "fallback": None},
     "europe-africa": {"rirs": ["ripe", "afrinic"], "label": "Europe + Africa", "fallback": None},
     "americas": {"rirs": ["arin", "lacnic"], "label": "Americas", "fallback": None},
+    "india": {"rirs": ["apnic"], "label": "India", "fallback": "apnic", "countries": ["IN"]},
+    "middle-east": {"rirs": ["ripe"], "label": "Middle East", "fallback": "ripe", "countries": ["SA", "AE", "QA", "OM", "KW", "BH", "IR", "IQ", "IL", "JO", "LB", "YE", "SY"]},
+    "oceania": {"rirs": ["apnic"], "label": "Oceania", "fallback": "apnic", "countries": ["AU", "NZ", "FJ", "PG", "SB", "VU", "NC", "PF"]},
+    "southeast-asia": {"rirs": ["apnic"], "label": "Southeast Asia", "fallback": "apnic", "countries": ["SG", "MY", "ID", "TH", "VN", "PH", "MM", "KH", "LA", "BN", "TL"]},
+    "east-asia": {"rirs": ["apnic"], "label": "East Asia", "fallback": "apnic", "countries": ["JP", "KR", "CN", "TW", "HK", "MO"]},
+    "central-asia": {"rirs": ["ripe"], "label": "Central Asia", "fallback": "ripe", "countries": ["KZ", "UZ", "TM", "KG", "TJ", "MN"]},
+    "nordics": {"rirs": ["ripe"], "label": "Nordics", "fallback": "ripe", "countries": ["SE", "NO", "DK", "FI", "IS"]},
+    "eastern-europe": {"rirs": ["ripe"], "label": "Eastern Europe", "fallback": "ripe", "countries": ["PL", "CZ", "HU", "RO", "BG", "SK", "SI", "HR", "RS", "BA", "AL", "MK", "ME", "LT", "LV", "EE", "MD", "UA", "BY"]},
+    "south-america": {"rirs": ["lacnic"], "label": "South America", "fallback": "lacnic", "countries": ["BR", "AR", "CL", "CO", "PE", "EC", "BO", "UY", "PY", "VE", "GY", "SR"]},
 }
 
 SSA_EXCLUDED_COUNTRIES = {"EG", "MA", "DZ", "TN", "LY", "SD"}
@@ -1279,6 +1288,9 @@ def generate_region_ips(region_name, count, include_countries=None, exclude_coun
     if not config:
         print(f"  [!] Unknown region: {region_name}", file=sys.stderr)
         return generate_internet_ips(count)
+
+    if include_countries is None and "countries" in config:
+        include_countries = config["countries"]
 
     rirs = config["rirs"]
     if len(rirs) == 1:
