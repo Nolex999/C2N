@@ -531,7 +531,7 @@ def get_session():
         s = requests.Session()
         s.verify = False
         s.headers.update({"User-Agent": random.choice(USER_AGENTS)})
-        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=1)
+        adapter = requests.adapters.HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=0)
         s.mount("http://", adapter)
         s.mount("https://", adapter)
         session_cache.session = s
@@ -545,7 +545,7 @@ def try_http(ip, port):
         url = f"{scheme}://{ip}:{port}"
         try:
             s = get_session()
-            r = s.get(url, timeout=(10, 15), allow_redirects=True)
+            r = s.get(url, timeout=(5, 10), allow_redirects=True)
             return r
         except requests.exceptions.SSLError:
             continue
@@ -733,7 +733,6 @@ def try_auth(ip, port, device_type="", use_https=False):
                 if has_login_form(body_lower) and not is_login_failure(body_lower):
                     continue
                 found.append((user, pw, note, r.status_code))
-                break
             elif r.status_code == 401:
                 time.sleep(random.uniform(0.5, 1.2))
                 continue

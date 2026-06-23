@@ -360,6 +360,8 @@ def api_scan(user):
         generate_region_ips, generate_internet_ips, generate_ips,
         scan_single, SCAN_PORTS, ALL_PORTS, GeoEnricher, REGION_CONFIG
     )
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
 
     selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
     cap = min(max_ips, 5000)
@@ -376,13 +378,18 @@ def api_scan(user):
         ips = generate_internet_ips(cap)
 
     results = []
-    for ip in ips:
-        try:
-            res = scan_single(ip, no_auth_only=False, ports=selected_ports)
-            if res:
-                results.extend(res)
-        except Exception:
-            pass
+    results_lock = Lock()
+
+    with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
+        fut_to_ip = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
+        for fut in as_completed(fut_to_ip):
+            try:
+                res = fut.result()
+                if res:
+                    with results_lock:
+                        results.extend(res)
+            except Exception:
+                pass
 
     if do_geo and results:
         geo_ips = list(set(r["ip"] for r in results))
