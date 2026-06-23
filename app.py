@@ -1,4 +1,4 @@
-import os, json, uuid
+import os, json, uuid, queue, threading, time
 from datetime import datetime, timezone
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, Response
@@ -497,23 +497,48 @@ def api_scan_stream(user):
         scanned = 0
         scanned_lock = Lock()
         results_lock = Lock()
+        event_queue = queue.Queue()
+        done = threading.Event()
 
-        with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
-            fut_map = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
-            for fut in as_completed(fut_map):
-                ip = fut_map[fut]
-                with scanned_lock:
-                    scanned += 1
-                try:
-                    res = fut.result()
-                except Exception:
-                    res = None
-                if res:
-                    with results_lock:
-                        all_results.extend(res)
-                    yield f"event: hit\ndata: {json.dumps({'ip': ip, 'results': res})}\n\n"
+        def heartbeat():
+            while not done.is_set():
+                event_queue.put(("ping", None))
+                done.wait(5)
+        hb = threading.Thread(target=heartbeat, daemon=True)
+        hb.start()
 
-                yield f"event: progress\ndata: {json.dumps({'scanned': scanned, 'total': total, 'hits': len(all_results), 'ip': ip})}\n\n"
+        def scan_worker():
+            with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
+                fut_map = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
+                for fut in as_completed(fut_map):
+                    ip = fut_map[fut]
+                    with scanned_lock:
+                        scanned += 1
+                    try:
+                        res = fut.result()
+                    except Exception:
+                        res = None
+                    if res:
+                        with results_lock:
+                            all_results.extend(res)
+                        event_queue.put(("hit", {'ip': ip, 'results': res}))
+                    event_queue.put(("progress", {'scanned': scanned, 'total': total, 'hits': len(all_results), 'ip': ip}))
+            event_queue.put(("_done", None))
+
+        sw = threading.Thread(target=scan_worker, daemon=True)
+        sw.start()
+
+        while True:
+            evt_type, data = event_queue.get()
+            if evt_type == "_done":
+                break
+            if evt_type == "ping":
+                yield f"event: ping\ndata: {json.dumps({'t': time.time()})}\n\n"
+            elif evt_type == "hit":
+                yield f"event: hit\ndata: {json.dumps(data)}\n\n"
+            elif evt_type == "progress":
+                yield f"event: progress\ndata: {json.dumps(data)}\n\n"
+        done.set()
 
         if do_geo and all_results:
             from GetYourDevice import GeoEnricher
