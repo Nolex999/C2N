@@ -376,7 +376,7 @@ def api_scan(user):
     from threading import Lock
 
     selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
-    cap = min(max_ips, 5000)
+    cap = min(max_ips, 2000)
 
     include_countries = None
     if country:
@@ -389,7 +389,9 @@ def api_scan(user):
     else:
         ips = generate_internet_ips(cap)
 
-    results = []
+    all_results = []
+    scanned = 0
+    scanned_lock = Lock()
     results_lock = Lock()
 
     with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
@@ -476,7 +478,7 @@ def api_scan_stream(user):
     do_geo = body.get("geo", False)
 
     selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
-    cap = min(max_ips, 5000)
+    cap = min(max_ips, 2000)
 
     include_countries = None
     if country:

@@ -517,7 +517,7 @@ DEVICE_PATTERNS = [
     (re.compile(r"Camly|Camly|camly", re.I), "Camly"),
 ]
 
-SCAN_PORTS = [80, 443, 8080, 8443, 8000, 8888, 5000, 3000, 81, 9090, 9443, 10000]
+SCAN_PORTS = [80, 443, 8080, 8443]
 WEBCAM_PORTS = [554, 8554, 8081, 8899, 9000, 7071, 7001, 82, 83, 85, 86, 87, 89]
 ALL_PORTS = [80, 443, 8080, 8443, 5000, 3000, 81, 88, 8081, 8888, 8000, 8008, 9090, 9443, 4443, 10000, 9001, 9000, 8834, 4848, 7777, 5555, 1234, 2000, 2082, 2083, 2086, 2087, 2095, 2096, 6443, 7443, 7071, 8282, 8989, 18080, 18081, 28080, 28081, 49000, 49152, 49154, 554, 8554, 8081, 8899, 82, 83, 85, 86, 87, 89]
 
@@ -546,7 +546,7 @@ def try_http(ip, port):
         url = f"{scheme}://{ip}:{port}"
         try:
             s = get_session()
-            r = s.get(url, timeout=(3, 8), allow_redirects=True)
+            r = s.get(url, timeout=(2, 6), allow_redirects=True)
             return r
         except requests.exceptions.SSLError:
             continue
@@ -877,6 +877,8 @@ def scan_single(ip_str, no_auth_only=False, ports=None):
             result["password"] = auth_success[0][1]
             result["note"] = auth_success[0][2]
         results.append(result)
+        if auth_success:
+            break
 
     return results
 
