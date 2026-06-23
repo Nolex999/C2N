@@ -14,6 +14,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from difflib import SequenceMatcher
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -724,7 +725,29 @@ _auth_attempt_lock = threading.Lock()
 MAX_AUTH_PER_IP = 12
 
 
-def try_auth(ip, port, device_type="", use_https=False):
+SESSION_COOKIE_NAMES = [
+    "session", "sid", "phpsessid", "token", "auth", "jwt",
+    "connect.sid", "aspsessionid", "cftoken", "csrftoken",
+]
+
+HAS_PASSWORD_INPUT = re.compile(r'<input[^>]*type=["\']?password["\']?', re.I)
+HAS_SESSION_COOKIE = re.compile(r'(session|sid|token|auth)[^=]*=', re.I)
+
+
+def body_has_password_input(body):
+    return bool(HAS_PASSWORD_INPUT.search(body or ""))
+
+
+def response_has_session_cookie(r):
+    for c in r.cookies:
+        cname = c.name.lower()
+        if any(x in cname for x in ("session", "sid", "token", "auth", "jwt")):
+            return True
+    set_cookie = (r.headers.get("Set-Cookie", "") or "").lower()
+    return bool(HAS_SESSION_COOKIE.search(set_cookie))
+
+
+def try_auth(ip, port, device_type="", use_https=False, unauth_body=""):
     global _auth_attempt_counts
     scheme = "https" if use_https else "http"
     found = []
@@ -744,16 +767,59 @@ def try_auth(ip, port, device_type="", use_https=False):
             )
             with _auth_attempt_lock:
                 _auth_attempt_counts[ip] = _auth_attempt_counts.get(ip, 0) + 1
-            if r.status_code in (200, 302, 301):
-                body_lower = (r.text or "").lower()[:5000]
-                if has_login_form(body_lower) and not has_dashboard_content(body_lower):
-                    continue
-                if is_login_failure(body_lower):
-                    continue
-                found.append((user, pw, note, r.status_code))
-            elif r.status_code == 401:
+
+            if r.status_code == 401:
                 time.sleep(random.uniform(0.5, 1.2))
                 continue
+
+            if r.status_code in (302, 301):
+                dest = r.headers.get("Location", "").lower()
+                login_paths = ("login", "auth", "signin", "logon", "authenticate")
+                if not any(x in dest for x in login_paths):
+                    found.append((user, pw, note, r.status_code))
+                continue
+
+            if r.status_code == 200:
+                body = r.text or ""
+                body_lower = body.lower()[:5000]
+
+                # Strong negative: still has a password input field
+                if body_has_password_input(body):
+                    continue
+
+                # Strong negative: body is same as unauthed (auth had no effect)
+                if unauth_body and len(body) > 200:
+                    ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
+                    if ratio > 0.85:
+                        continue
+
+                # Strong negative: still has login form and no dashboard content
+                if has_login_form(body_lower) and not has_dashboard_content(body_lower):
+                    continue
+
+                # Negative: failure keywords
+                if is_login_failure(body_lower):
+                    continue
+
+                # Positive: session cookie set
+                has_session = response_has_session_cookie(r)
+
+                # Positive: dashboard/admin content
+                has_dash = has_dashboard_content(body_lower)
+
+                # Positive: page title changed from unauthed
+                title_match = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
+                unauth_title_match = re.search(r"<title>(.*?)</title>", unauth_body, re.I | re.S)
+                title_diff = False
+                if title_match and unauth_title_match:
+                    t1 = title_match.group(1).strip().lower()
+                    t2 = unauth_title_match.group(1).strip().lower()
+                    title_diff = t1 != t2 and not any(x in t1 for x in ("login", "sign in", "authenticate"))
+
+                if has_session or has_dash or title_diff:
+                    found.append((user, pw, note, r.status_code))
+                elif not has_login_form(body_lower):
+                    found.append((user, pw, note, r.status_code))
         except Exception:
             time.sleep(random.uniform(0.3, 0.8))
             with _auth_attempt_lock:
@@ -783,7 +849,7 @@ def scan_single(ip_str, no_auth_only=False, ports=None):
 
         auth_success = []
         if not no_auth:
-            auth_success = try_auth(ip_str, port, device_type=device, use_https=is_https)
+            auth_success = try_auth(ip_str, port, device_type=device, use_https=is_https, unauth_body=r.text)
 
         result = {
             "ip": ip_str,
