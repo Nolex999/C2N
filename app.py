@@ -1,7 +1,7 @@
 import os, json, uuid
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -442,6 +442,116 @@ def api_scan(user):
         "results_count": len(results),
         "results": results,
     })
+
+@app.route("/api/scan/stream", methods=["POST"])
+@require_auth
+def api_scan_stream(user):
+    from GetYourDevice import (
+        generate_region_ips, generate_internet_ips, generate_ips,
+        scan_single, SCAN_PORTS, ALL_PORTS, REGION_CONFIG
+    )
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from threading import Lock
+
+    body = request.get_json(force=True)
+    target = body.get("target", "")
+    region = body.get("region", "")
+    internet = body.get("internet", False)
+    max_ips = int(body.get("max_ips", 500))
+    threads = int(body.get("threads", 10))
+    ports = body.get("ports", "fast")
+    country = body.get("country", None)
+    do_geo = body.get("geo", False)
+
+    selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
+    cap = min(max_ips, 5000)
+
+    include_countries = None
+    if country:
+        include_countries = set(c.strip().upper() for c in country.split(",") if c.strip())
+
+    if region and region in REGION_CONFIG:
+        ips = generate_region_ips(region, cap, include_countries=include_countries)
+    elif target:
+        ips = generate_ips(target, cap)
+    else:
+        ips = generate_internet_ips(cap)
+
+    def event_stream():
+        total = len(ips)
+        yield f"event: start\ndata: {json.dumps({'total': total})}\n\n"
+
+        all_results = []
+        scanned = 0
+        scanned_lock = Lock()
+        results_lock = Lock()
+
+        with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
+            fut_map = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
+            for fut in as_completed(fut_map):
+                ip = fut_map[fut]
+                with scanned_lock:
+                    scanned += 1
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                if res:
+                    with results_lock:
+                        all_results.extend(res)
+                    yield f"event: hit\ndata: {json.dumps({'ip': ip, 'results': res})}\n\n"
+
+                yield f"event: progress\ndata: {json.dumps({'scanned': scanned, 'total': total, 'hits': len(all_results), 'ip': ip})}\n\n"
+
+        if do_geo and all_results:
+            from GetYourDevice import GeoEnricher
+            geo_ips = list(set(r["ip"] for r in all_results))
+            geo_data = GeoEnricher.enrich_batch(geo_ips)
+            for r in all_results:
+                g = geo_data.get(r["ip"], {})
+                r.update(g)
+
+        uid = user.id
+        creds_count = sum(1 for r in all_results if r.get("auth_found"))
+        open_count = sum(1 for r in all_results if r.get("no_auth"))
+
+        if all_results:
+            try:
+                scan_resp = supabase.table("scan_results").insert({
+                    "user_id": uid,
+                    "total_scanned": total,
+                    "results_count": len(all_results),
+                    "creds_count": creds_count,
+                    "open_count": open_count,
+                    "region": region or "internet",
+                    "ports": ports,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }).execute()
+                result_id = scan_resp.data[0]["id"]
+                items = []
+                for i, r in enumerate(all_results):
+                    items.append({
+                        "result_id": str(result_id),
+                        "item_index": i,
+                        "ip": r.get("ip"), "port": r.get("port"),
+                        "url": r.get("url"), "device": r.get("device"),
+                        "no_auth": r.get("no_auth"), "auth_found": r.get("auth_found"),
+                        "username": r.get("username"), "password": r.get("password"),
+                        "note": r.get("note"), "status_code": r.get("status_code"),
+                        "country": r.get("country"), "country_code": r.get("country_code"),
+                        "region_name": r.get("region"), "city": r.get("city"),
+                        "lat": r.get("lat"), "lon": r.get("lon"),
+                        "org": r.get("org"), "isp": r.get("isp"),
+                        "as_info": r.get("as"),
+                        "broken": False,
+                    })
+                supabase.table("scan_result_items").insert(items).execute()
+            except Exception as e:
+                print(f"[!] Stream scan DB save error: {e}")
+
+        yield f"event: done\ndata: {json.dumps({'total_scanned': total, 'results_count': len(all_results)})}\n\n"
+
+    return Response(event_stream(), mimetype="text/event-stream")
 
 # ─────────────── Invite code management ───────────────
 

@@ -545,7 +545,7 @@ def try_http(ip, port):
         url = f"{scheme}://{ip}:{port}"
         try:
             s = get_session()
-            r = s.get(url, timeout=(5, 10), allow_redirects=True)
+            r = s.get(url, timeout=(3, 8), allow_redirects=True)
             return r
         except requests.exceptions.SSLError:
             continue
