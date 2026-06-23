@@ -510,6 +510,7 @@ def api_scan_stream(user):
         hb.start()
 
         def scan_worker():
+            nonlocal scanned
             with ThreadPoolExecutor(max_workers=min(threads, 50)) as pool:
                 fut_map = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
                 for fut in as_completed(fut_map):
