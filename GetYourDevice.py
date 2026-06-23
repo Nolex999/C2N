@@ -563,12 +563,28 @@ def try_http(ip, port):
 LOGIN_KEYWORDS = [
     "login", "password", "sign in", "sign-in", "authenticate",
     "log in", "log-in", "sign on", "sign-on", "credentials",
+    "username", "type=\"password\"", "name=\"pass", "name=\"user",
+    "input_password", "input_user", "mikrotik login",
+    "routeros", "keep me logged in", "forgot password",
+    "authorization required", "enter password",
 ]
 
 
 def has_login_form(body):
     body_lower = body.lower()[:10000]
     return any(x in body_lower for x in LOGIN_KEYWORDS)
+
+
+DASHBOARD_KEYWORDS = [
+    "dashboard", "welcome", "logout", "administration", "system status",
+    "network", "overview", "management", "configuration",
+    "settings", "admin panel", "control panel",
+]
+
+
+def has_dashboard_content(body):
+    body_lower = body.lower()[:10000]
+    return any(x in body_lower for x in DASHBOARD_KEYWORDS)
 
 
 LOGIN_ERROR_KEYWORDS = [
@@ -730,7 +746,9 @@ def try_auth(ip, port, device_type="", use_https=False):
                 _auth_attempt_counts[ip] = _auth_attempt_counts.get(ip, 0) + 1
             if r.status_code in (200, 302, 301):
                 body_lower = (r.text or "").lower()[:5000]
-                if has_login_form(body_lower) and not is_login_failure(body_lower):
+                if has_login_form(body_lower) and not has_dashboard_content(body_lower):
+                    continue
+                if is_login_failure(body_lower):
                     continue
                 found.append((user, pw, note, r.status_code))
             elif r.status_code == 401:

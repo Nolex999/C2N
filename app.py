@@ -282,9 +282,21 @@ def api_test_device(user, item_id):
         result["headers"] = dict(r.headers)
         result["body_preview"] = r.text[:2000]
         if r.status_code in (200, 301, 302):
-            result["status"] = "ok"
-            result["message"] = "Credentials work"
-            supabase.table("scan_result_items").update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()}).eq("id", item_uuid).execute()
+            body_lower = (r.text or "").lower()[:5000]
+            login_kw = ["login", "password", "sign in", "username", "type=\"password\"", "authenticate"]
+            has_login = any(x in body_lower for x in login_kw)
+            fail_kw = ["invalid", "incorrect", "wrong", "failed", "denied", "unauthorized"]
+            has_fail = any(x in body_lower for x in fail_kw)
+            dash_kw = ["dashboard", "welcome", "logout", "administration", "overview", "settings"]
+            has_dash = any(x in body_lower for x in dash_kw)
+            if has_login and not has_dash:
+                result["message"] = "Still on login page (credentials rejected or form-based auth)"
+            elif has_fail:
+                result["message"] = f"Login failure detected ({' '.join(x for x in fail_kw if x in body_lower)})"
+            else:
+                result["status"] = "ok"
+                result["message"] = "Credentials work"
+                supabase.table("scan_result_items").update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()}).eq("id", item_uuid).execute()
         else:
             result["message"] = f"HTTP {r.status_code}"
     except Exception as e:
