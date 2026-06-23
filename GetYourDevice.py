@@ -1262,7 +1262,7 @@ def download_rir_delegated(rir_name, force=False):
             return path
     try:
         print(f"  [*] Downloading {config['label']} IP allocation data...", file=sys.stderr)
-        r = requests.get(url, timeout=60)
+        r = requests.get(url, timeout=30)
         r.raise_for_status()
         with open(path, "w", encoding="utf-8") as f:
             f.write(r.text)
@@ -1329,6 +1329,25 @@ def generate_ips_from_ranges(count, ranges):
     return ips
 
 
+def prefetch_rir_data(rir_names):
+    """Download all needed RIR files in parallel."""
+    needed = []
+    for name in rir_names:
+        config = RIR_CONFIG.get(name)
+        if not config:
+            continue
+        path = os.path.join(_get_rir_cache_dir(), f"delegated-{name}-extended-latest.txt")
+        if os.path.exists(path):
+            age = time.time() - os.path.getmtime(path)
+            if age < 86400:
+                continue
+        needed.append(name)
+    if not needed:
+        return
+    with ThreadPoolExecutor(max_workers=len(needed)) as ex:
+        list(ex.map(lambda n: download_rir_delegated(n, force=True), needed))
+
+
 def generate_rir_ips(rir_name, count, include_countries=None, exclude_countries=None):
     config = RIR_CONFIG.get(rir_name)
     if not config:
@@ -1383,6 +1402,7 @@ def generate_region_ips(region_name, count, include_countries=None, exclude_coun
             exclude_countries = SSA_EXCLUDED_COUNTRIES
         return generate_rir_ips(rir, count, include_countries=include_countries, exclude_countries=exclude_countries)
 
+    prefetch_rir_data(rirs)
     ips = []
     per_rir = max(count // len(rirs), 1)
     for rir in rirs:
