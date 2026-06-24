@@ -41,7 +41,8 @@ interface DeviceState {
 interface DashboardCountry { code: string; count: number; creds: number; open: number; lat?: number; lon?: number; }
 interface DashboardPort { port: number; count: number; }
 interface DashboardStats { total_scans: number; total_results: number; total_creds: number; total_open: number; countries_hit: number; unique_ips: number; }
-interface DashboardData { stats: DashboardStats; by_country: DashboardCountry[]; by_port: DashboardPort[]; recent: any[]; }
+interface DashboardGeoPoint { lat: number; lon: number; ip: string; port: number; device: string; country_code?: string; org?: string; isp?: string; as_info?: string; url?: string; auth_found?: boolean; no_auth?: boolean; username?: string; password?: string; }
+interface DashboardData { stats: DashboardStats; by_country: DashboardCountry[]; by_port: DashboardPort[]; recent: any[]; geo_points: DashboardGeoPoint[]; }
 
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_KEY));
@@ -607,25 +608,6 @@ export default function App() {
 
   // ── Dashboard / Map Data ──
 
-  const COUNTRY_CENTROIDS: Record<string, [number,number]> = {
-    US:[-98,38], CA:[-106,56], MX:[-100,23], BR:[-55,-15], AR:[-63,-38], CL:[-71,-35],
-    CO:[-74,4], PE:[-76,-10], GB:[-3,55], FR:[2,46], DE:[10,51], IT:[12,42],
-    ES:[-4,40], PT:[-8,40], NL:[5,52], BE:[4,50], CH:[8,47], SE:[15,62],
-    NO:[10,62], DK:[10,56], PL:[20,52], CZ:[15,50], SK:[18,49], HU:[19,47],
-    RO:[25,46], BG:[25,43], GR:[22,39], AT:[14,48], IE:[-8,53], FI:[26,64],
-    LT:[24,55], LV:[25,57], EE:[26,59], RU:[40,60], UA:[31,49], BY:[28,54],
-    TR:[35,39], NG:[8,8], ZA:[26,-30], EG:[30,27], MA:[-7,32], KE:[38,0],
-    DZ:[3,28], TN:[10,34], LY:[17,26], SD:[30,15], GH:[-2,8], CN:[105,35],
-    JP:[138,38], IN:[78,20], KR:[128,37], TH:[101,15], VN:[107,14], ID:[120,-5],
-    PH:[123,12], MY:[102,4], SG:[104,1], PK:[70,30], BD:[90,24], IR:[54,32],
-    IQ:[44,33], SA:[45,24], AE:[55,24], IL:[35,31], JO:[36,31], KW:[48,29],
-    QA:[51,25], AU:[134,-25], NZ:[174,-41], UY:[-56,-32], PY:[-58,-23],
-    SI:[15,46], HR:[16,45], BA:[18,44], RS:[21,44], ME:[19,43], MK:[22,41],
-    AL:[20,41], MD:[29,47], AM:[45,40], GE:[43,42], AZ:[47,40], KZ:[68,48],
-    UZ:[64,42], TM:[60,40], KG:[74,41], TJ:[71,39], MN:[105,46], NP:[84,28],
-    BT:[90,27], LK:[80,7], MM:[96,22], KH:[105,13], LA:[102,18],
-  };
-
   const fetchDashboard = async () => {
     setDashLoading(true);
     try {
@@ -647,36 +629,54 @@ export default function App() {
       zoom: 1.5,
     });
 
+    const popup = new mapboxgl.Popup({ offset: 25, closeButton: true });
+
     map.on('load', () => {
-      map.addSource('countries', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addSource('devices', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
       map.addLayer({
-        id: 'country-circles',
+        id: 'device-circles',
         type: 'circle',
-        source: 'countries',
+        source: 'devices',
         paint: {
-          'circle-radius': ['interpolate', ['linear'], ['get', 'count'], 1, 5, 10, 15, 100, 30, 500, 45],
-          'circle-color': '#2563eb',
-          'circle-opacity': 0.75,
-          'circle-stroke-width': 2,
+          'circle-radius': [
+            'case', ['>=', ['get', 'count'], 5], 6,
+            ['>=', ['get', 'count'], 2], 4, 3
+          ],
+          'circle-color': [
+            'case', ['get', 'auth_found'], '#16a34a',
+            ['get', 'no_auth'], '#ea580c', '#2563eb'
+          ],
+          'circle-opacity': 0.8,
+          'circle-stroke-width': 1.5,
           'circle-stroke-color': '#fff',
         },
       });
-      map.addLayer({
-        id: 'country-labels',
-        type: 'symbol',
-        source: 'countries',
-        layout: {
-          'text-field': ['concat', ['get', 'code'], '\n', ['to-string', ['get', 'count']]],
-          'text-size': 10,
-          'text-offset': [0, 1.8],
-          'text-line-height': 1.3,
-        },
-        paint: {
-          'text-color': '#fff',
-          'text-halo-color': '#000',
-          'text-halo-width': 1.2,
-        },
+
+      map.on('click', 'device-circles', (e) => {
+        if (!e.features?.[0]) return;
+        const p = e.features[0].properties!;
+        const badge = p.auth_found ? '<span style="background:#16a34a;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">CRED</span>'
+          : p.no_auth ? '<span style="background:#ea580c;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">OPEN</span>'
+          : '<span style="background:#2563eb;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600">AUTH</span>';
+        const html = `
+          <div style="font:12px Inter,sans-serif;line-height:1.5">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+              ${badge} <strong>${p.ip}:${p.port}</strong>
+            </div>
+            ${p.url ? `<div style="color:#666;font-size:10px;margin-bottom:4px">${p.url}</div>` : ''}
+            ${p.device ? `<div><strong>Device:</strong> ${p.device}</div>` : ''}
+            ${p.country_code ? `<div><strong>Country:</strong> ${p.country_code}</div>` : ''}
+            ${p.org ? `<div style="margin-top:4px"><strong>Org:</strong> ${p.org}</div>` : ''}
+            ${p.isp ? `<div><strong>ISP:</strong> ${p.isp}</div>` : ''}
+            ${p.as_info ? `<div><strong>AS:</strong> ${p.as_info}</div>` : ''}
+            ${p.username ? `<div style="margin-top:4px"><strong>Creds:</strong> ${p.username}:${p.password || '—'}</div>` : ''}
+          </div>`;
+        popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
       });
+
+      map.on('mouseenter', 'device-circles', () => { map.getCanvas().style.cursor = 'pointer'; });
+      map.on('mouseleave', 'device-circles', () => { map.getCanvas().style.cursor = ''; });
+
       mapInitRef.current = true;
       updateMapData(map);
     });
@@ -685,6 +685,7 @@ export default function App() {
 
     return () => {
       if (mapInstRef.current) {
+        popup.remove();
         mapInstRef.current.remove();
         mapInitRef.current = false;
         mapInstRef.current = null;
@@ -694,18 +695,20 @@ export default function App() {
 
   const updateMapData = useCallback((map: mapboxgl.Map) => {
     if (!dashboard) return;
-    const features: any[] = [];
-    dashboard.by_country.forEach(c => {
-      const centroid = COUNTRY_CENTROIDS[c.code] || (c.lat != null && c.lon != null ? [c.lon, c.lat] : null);
-      if (!centroid) return;
-      features.push({
-        type: 'Feature',
-        geometry: { type: 'Point', coordinates: [centroid[0], centroid[1]] },
-        properties: { code: c.code, count: c.count },
-      });
-    });
+    const features: any[] = (dashboard.geo_points || []).map(pt => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [pt.lon, pt.lat] },
+      properties: {
+        ip: pt.ip, port: pt.port, device: pt.device,
+        url: pt.url, country_code: pt.country_code,
+        org: pt.org, isp: pt.isp, as_info: pt.as_info,
+        auth_found: pt.auth_found, no_auth: pt.no_auth,
+        username: pt.username, password: pt.password,
+        count: 1,
+      },
+    }));
     try {
-      (map.getSource('countries') as mapboxgl.GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
+      (map.getSource('devices') as mapboxgl.GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
     } catch {}
   }, [dashboard]);
 

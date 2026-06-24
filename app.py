@@ -1099,16 +1099,29 @@ def api_dashboard_stats(user):
         by_country = {}
         by_port = {}
         recent_items = []
+        geo_points = []
         if scan_ids:
             items = supabase.table("scan_result_items").select("*").in_("result_id", scan_ids).order("item_index", desc=True).limit(2000).execute()
             seen_ips = set()
             countries_set = set()
             for it in items.data:
+                lat = it.get("lat")
+                lon = it.get("lon")
+                if lat and lon:
+                    geo_points.append({
+                        "lat": lat, "lon": lon,
+                        "ip": it.get("ip"), "port": it.get("port"),
+                        "device": it.get("device"), "country_code": it.get("country_code"),
+                        "org": it.get("org"), "isp": it.get("isp"),
+                        "as_info": it.get("as"), "url": it.get("url"),
+                        "auth_found": it.get("auth_found"), "no_auth": it.get("no_auth"),
+                        "username": it.get("username"), "password": it.get("password"),
+                    })
                 cc = it.get("country_code") or ""
                 if cc:
                     countries_set.add(cc)
                     if cc not in by_country:
-                        by_country[cc] = {"code": cc, "count": 0, "creds": 0, "open": 0, "lat": it.get("lat"), "lon": it.get("lon")}
+                        by_country[cc] = {"code": cc, "count": 0, "creds": 0, "open": 0, "lat": lat, "lon": lon}
                     by_country[cc]["count"] += 1
                     if it.get("auth_found"): by_country[cc]["creds"] += 1
                     if it.get("no_auth"): by_country[cc]["open"] += 1
@@ -1138,6 +1151,7 @@ def api_dashboard_stats(user):
             "by_country": country_list[:30],
             "by_port": port_list[:20],
             "recent": recent_items,
+            "geo_points": geo_points,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
