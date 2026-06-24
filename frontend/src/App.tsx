@@ -384,18 +384,45 @@ export default function App() {
         method: 'POST', body: JSON.stringify({ username: s.user, password: s.pass })
       });
       const d = await r.json();
+      const score = d.score !== undefined ? ` [score=${d.score}]` : '';
+      const reasons = d.reasons?.length ? `\nSignals: ${d.reasons.join(', ')}` : '';
       if (d.status === 'ok') {
         updDevice(id, {
           loading: false, status: '✓ Working', showShell: true,
-          output: `✓ Credentials accepted\nHTTP ${d.status_code}\n\n${JSON.stringify(d.headers, null, 2)}`
+          output: `✓ Credentials accepted${score}\nHTTP ${d.status_code}\n\n${JSON.stringify(d.headers, null, 2)}${reasons}`
         });
         setItems(p => p.map(i => i.id === id ? { ...i, broken: true } : i));
         toast(`Device ${id} — credentials verified`, 'success');
       } else {
-        updDevice(id, { loading: false, status: '✗ Failed', output: `✗ ${d.message || 'Failed'}` });
+        updDevice(id, { loading: false, status: '✗ Failed', output: `✗ ${d.message || 'Failed'}${score}${reasons}` });
       }
     } catch (err: any) {
       updDevice(id, { loading: false, status: '✗ Error', output: `Error: ${err.message}` });
+    }
+  };
+
+  const bruteDevice = async (id: number) => {
+    const s = deviceStates[id];
+    if (!s) return;
+    updDevice(id, { loading: true, output: 'Brute forcing…' });
+    try {
+      const r = await apiFetch(`/api/devices/${id}/brute`, {
+        method: 'POST', body: JSON.stringify({ max_tries: 50 })
+      });
+      const d = await r.json();
+      if (d.working?.length > 0) {
+        const lines = d.working.map((w: any) => `✓ ${w.username}:${w.password} [score=${w.score}] ${w.note || ''}`).join('\n');
+        updDevice(id, {
+          loading: false, status: `✓ Bruted (${d.working.length})`, showShell: true,
+          output: `Found ${d.working.length} working creds (tried ${d.total_tried}):\n\n${lines}`
+        });
+        setItems(p => p.map(i => i.id === id ? { ...i, broken: true, username: d.working[0].username, password: d.working[0].password } : i));
+        toast(`Device ${id} — ${d.working.length} working creds found`, 'success');
+      } else {
+        updDevice(id, { loading: false, status: '✗ No creds', output: `Tried ${d.total_tried} creds — none worked.` });
+      }
+    } catch (err: any) {
+      updDevice(id, { loading: false, status: '✗ Error', output: `Brute error: ${err.message}` });
     }
   };
 
@@ -1103,6 +1130,9 @@ export default function App() {
                                     <input type="text" placeholder="Password" value={ds.pass}
                                       onChange={e => updDevice(item.id, { pass: e.target.value })} disabled={ds.loading} />
                                     <button className="interact-btn" onClick={() => testDevice(item.id)} disabled={ds.loading}>Test</button>
+                                    <button className="interact-btn outline-btn" onClick={() => bruteDevice(item.id)} disabled={ds.loading} title="Try 50 credential combinations">
+                                      <RefreshCw size={11} /> Brute
+                                    </button>
                                     <button className="interact-btn outline-btn" onClick={() => openDevice(item)}>
                                       <ExternalLink size={12} />
                                     </button>

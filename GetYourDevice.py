@@ -563,13 +563,46 @@ def try_http(ip, port):
 
 LOGIN_KEYWORDS = [
     "login", "password", "sign in", "sign-in", "authenticate",
-    "log in", "log-in", "sign on", "sign-on", "credentials",
+    "log in", "log-in", "credentials",
     "username", "type=\"password\"", "name=\"pass", "name=\"user",
     "input_password", "input_user", "mikrotik login",
     "routeros", "keep me logged in", "forgot password",
     "authorization required", "enter password",
 ]
 
+# Stronger failure keywords — these are SPECIFIC error messages, not generic words
+FAILURE_PHRASES = [
+    "invalid password", "incorrect password", "wrong password",
+    "invalid username", "incorrect username", "wrong username",
+    "invalid credentials", "incorrect credentials",
+    "authentication failed", "login failed", "access denied",
+    "password does not match", "invalid login",
+    "login incorrect", "bad password", "bad login",
+    "username or password", "invalid user",
+    "permission denied", "authorization failed",
+    "wrong credentials",
+    "failed to login", "sign in failed",
+    "username and password", "user name and password",
+    "authentification failed", "mot de passe incorrect",
+    "invalid password", "verification failed",
+]
+
+SUCCESS_PHRASES = [
+    "welcome", "logged in", "logged in as",
+    "welcome back", "successfully", "last login",
+    "logout", "sign out", "my account",
+    "profile", "session started", "system status",
+    "interface", "routing", "wireless", "administration",
+    "configuration", "overview", "dashboard",
+]
+
+ERROR_CLASS_PATTERNS = re.compile(
+    r'class=["\'][^"\']*(?:error|alert|danger|warning|fail|msg-err)[^"\']*["\']'
+    r'|id=["\'][^"\']*(?:error|alert|danger|warning|fail)[^"\']*["\']'
+    r'|(?:error|alert|fail)_message'
+    r'|msg-error|err-msg',
+    re.I
+)
 
 def has_login_form(body):
     body_lower = body.lower()[:10000]
@@ -588,15 +621,42 @@ def has_dashboard_content(body):
     return any(x in body_lower for x in DASHBOARD_KEYWORDS)
 
 
-LOGIN_ERROR_KEYWORDS = [
-    "invalid", "incorrect", "wrong", "failed", "error",
-    "denied", "unauthorized", "forbidden",
-]
+def has_dashboard_content_int(body):
+    bl = (body or "").lower()[:10000]
+    return sum(1 for x in DASHBOARD_KEYWORDS if x in bl)
 
 
+def extract_title(body):
+    m = re.search(r"<title>(.*?)</title>", body or "", re.I | re.S)
+    return m.group(1).strip() if m else ""
+
+
+def extract_form_fields(body):
+    if not body:
+        return None
+    pw = len(re.findall(r'<input[^>]*type=["\']?password["\']?', body, re.I))
+    inp = len(re.findall(r'<input', body, re.I))
+    btn = len(re.findall(r'<button', body, re.I))
+    return {"password_count": pw, "input_count": inp, "button_count": btn}
+
+
+def count_failure_phrases(body):
+    bl = body.lower()[:5000]
+    return sum(1 for p in FAILURE_PHRASES if p in bl)
+
+
+def has_error_banner(body):
+    return bool(ERROR_CLASS_PATTERNS.search(body or ""))
+
+
+def body_has_success_phrases(body):
+    bl = body.lower()[:5000]
+    return sum(1 for s in SUCCESS_PHRASES if s in bl)
+
+
+LOGIN_ERROR_KEYWORDS = []
 def is_login_failure(body):
-    body_lower = body.lower()[:5000]
-    return any(x in body_lower for x in LOGIN_ERROR_KEYWORDS)
+    return False
 
 
 AUTH_REALM_BLACKLIST = [
@@ -752,6 +812,9 @@ def try_auth(ip, port, device_type="", use_https=False, unauth_body=""):
     scheme = "https" if use_https else "http"
     found = []
 
+    unauth_title = extract_title(unauth_body)
+    unauth_forms = extract_form_fields(unauth_body)
+
     creds_to_try = get_relevant_creds(device_type)
     for user, pw, note in creds_to_try:
         with _auth_attempt_lock:
@@ -769,7 +832,7 @@ def try_auth(ip, port, device_type="", use_https=False, unauth_body=""):
                 _auth_attempt_counts[ip] = _auth_attempt_counts.get(ip, 0) + 1
 
             if r.status_code == 401:
-                time.sleep(random.uniform(0.5, 1.2))
+                time.sleep(random.uniform(0.3, 0.8))
                 continue
 
             if r.status_code in (302, 301):
@@ -783,42 +846,65 @@ def try_auth(ip, port, device_type="", use_https=False, unauth_body=""):
                 body = r.text or ""
                 body_lower = body.lower()[:5000]
 
-                # Strong negative: still has a password input field
+                # ─── Scoring: positive signals ───
+                score = 0
+
+                # Session cookie set → strong positive
+                if response_has_session_cookie(r):
+                    score += 40
+
+                # Dashboard/admin content found → strong positive
+                dash_count = has_dashboard_content_int(body_lower)
+                score += dash_count * 8
+
+                # Title changed meaningfully
+                cur_title = extract_title(body)
+                if cur_title and unauth_title:
+                    t1, t2 = cur_title.lower(), unauth_title.lower()
+                    if t1 != t2 and not any(x in t1 for x in ("login", "sign in", "signin", "authenticate", "password")):
+                        score += 20
+
+                # Form structure changed — fewer/no password fields
+                auth_forms = extract_form_fields(body)
+                if unauth_forms and auth_forms:
+                    if unauth_forms["password_count"] > 0 and auth_forms["password_count"] == 0:
+                        score += 30
+                    if unauth_forms["input_count"] > auth_forms["input_count"] + 1:
+                        score += 10  # More fields = dashboard vs login
+
+                # Success phrases
+                score += body_has_success_phrases(body) * 6
+
+                # ─── Scoring: negative signals ───
+                # Password input still present → very likely still on login
                 if body_has_password_input(body):
-                    continue
+                    score -= 40
 
-                # Strong negative: body is same as unauthed (auth had no effect)
-                if unauth_body and len(body) > 200:
+                # Body too similar to unauthed → auth had no visible effect
+                if unauth_body and len(body) > 200 and len(unauth_body) > 200:
                     ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
-                    if ratio > 0.85:
-                        continue
+                    if ratio > 0.93:
+                        score -= 50
+                    elif ratio > 0.80:
+                        score -= 20
+                    elif ratio > 0.70:
+                        score -= 8
 
-                # Strong negative: still has login form and no dashboard content
-                if has_login_form(body_lower) and not has_dashboard_content(body_lower):
-                    continue
+                # Login form present without dashboard content
+                if has_login_form(body_lower):
+                    if not has_dashboard_content(body_lower):
+                        score -= 30
 
-                # Negative: failure keywords
-                if is_login_failure(body_lower):
-                    continue
+                # Failure-specific phrases
+                fail_count = count_failure_phrases(body)
+                score -= fail_count * 8
 
-                # Positive: session cookie set
-                has_session = response_has_session_cookie(r)
+                # Error banner/alert HTML classes
+                if has_error_banner(body_lower):
+                    score -= 20
 
-                # Positive: dashboard/admin content
-                has_dash = has_dashboard_content(body_lower)
-
-                # Positive: page title changed from unauthed
-                title_match = re.search(r"<title>(.*?)</title>", body, re.I | re.S)
-                unauth_title_match = re.search(r"<title>(.*?)</title>", unauth_body, re.I | re.S)
-                title_diff = False
-                if title_match and unauth_title_match:
-                    t1 = title_match.group(1).strip().lower()
-                    t2 = unauth_title_match.group(1).strip().lower()
-                    title_diff = t1 != t2 and not any(x in t1 for x in ("login", "sign in", "authenticate"))
-
-                if has_session or has_dash or title_diff:
-                    found.append((user, pw, note, r.status_code))
-                elif not has_login_form(body_lower):
+                # ─── Decision ───
+                if score >= 25:
                     found.append((user, pw, note, r.status_code))
         except Exception:
             time.sleep(random.uniform(0.3, 0.8))
