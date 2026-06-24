@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Activity, History, Mail, LogOut, User, Play, Square, Trash,
   Copy, ExternalLink, CheckCircle, XCircle, AlertCircle,
-  ChevronDown, ChevronUp, Globe, MapPin, Info, RefreshCw
+  ChevronDown, ChevronUp, Globe, MapPin, Info, RefreshCw,
+  Download, BarChart
 } from 'lucide-react';
 
 const TOKEN_KEY = 'gyd_token';
@@ -36,11 +37,16 @@ interface DeviceState {
   user: string; pass: string; showShell: boolean; command: string;
 }
 
+interface DashboardCountry { code: string; count: number; creds: number; open: number; lat?: number; lon?: number; }
+interface DashboardPort { port: number; count: number; }
+interface DashboardStats { total_scans: number; total_results: number; total_creds: number; total_open: number; countries_hit: number; unique_ips: number; }
+interface DashboardData { stats: DashboardStats; by_country: DashboardCountry[]; by_port: DashboardPort[]; recent: any[]; }
+
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState<UserInfo | null>(null);
   const [checking, setChecking] = useState(true);
-  const [activeTab, setActiveTab] = useState<'scan' | 'output' | 'invites'>('scan');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'scan' | 'output' | 'invites'>('dashboard');
   const [inviteOnly, setInviteOnly] = useState(true);
 
   // Auth
@@ -87,6 +93,11 @@ export default function App() {
   const [invites, setInvites] = useState<InviteCode[]>([]);
   const [invLoading, setInvLoading] = useState(false);
 
+  // Dashboard
+  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
+  const [dashLoading, setDashLoading] = useState(false);
+  const mapRef = useRef<HTMLCanvasElement>(null);
+
   // Toasts
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -132,6 +143,7 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
+    if (token && activeTab === 'dashboard') fetchDashboard();
     if (token && activeTab === 'output') fetchOutputs();
     if (token && activeTab === 'invites') fetchInvites();
   }, [activeTab, token]);
@@ -438,6 +450,120 @@ export default function App() {
     return Object.entries(g).sort((a, b) => b[0].localeCompare(a[0]));
   };
 
+  // ── Dashboard / Map Data ──
+
+  const CONTINENTS_DATA: Record<string, [number,number][]> = {
+    north_america: [[-130,55],[-125,50],[-120,35],[-115,30],[-105,25],[-100,20],[-90,18],[-85,12],[-80,8],[-80,25],[-77,27],[-75,30],[-70,35],[-70,42],[-65,45],[-60,48],[-55,50],[-55,55],[-60,60],[-70,65],[-80,70],[-95,70],[-110,70],[-120,70],[-140,65],[-150,65],[-160,62],[-165,60],[-130,55]],
+    south_america: [[-80,8],[-77,5],[-80,0],[-75,-5],[-80,-10],[-75,-15],[-70,-18],[-65,-25],[-60,-30],[-55,-35],[-58,-40],[-60,-50],[-65,-55],[-70,-53],[-72,-48],[-70,-40],[-60,-35],[-55,-30],[-50,-20],[-45,-15],[-43,-10],[-40,-5],[-45,0],[-50,5],[-60,5],[-70,8],[-80,8]],
+    europe: [[-10,36],[-10,38],[-5,40],[0,42],[3,43],[7,44],[10,43],[15,40],[20,38],[25,36],[28,40],[30,42],[28,45],[25,48],[20,48],[15,48],[10,55],[5,55],[0,48],[-5,48],[-8,45],[-10,43],[-10,40],[-10,36]],
+    africa: [[-15,35],[-17,30],[-15,22],[-12,15],[-15,10],[-10,5],[-5,0],[0,0],[10,2],[12,0],[15,5],[20,5],[25,2],[30,0],[35,5],[40,10],[42,12],[40,15],[35,18],[35,25],[30,30],[33,35],[30,37],[25,35],[20,37],[15,37],[10,35],[5,35],[0,35],[-5,36],[-15,35]],
+    asia: [[30,42],[35,40],[40,40],[45,40],[50,40],[55,35],[60,25],[65,22],[70,20],[75,15],[80,10],[85,10],[90,20],[95,25],[100,15],[105,10],[110,0],[115,5],[120,10],[125,15],[130,20],[135,35],[140,40],[145,45],[150,50],[145,55],[140,60],[135,65],[130,60],[120,55],[110,55],[100,55],[90,50],[80,45],[70,40],[60,40],[50,42],[45,42],[40,42],[30,42]],
+    australia: [[115,-15],[120,-15],[125,-15],[130,-12],[135,-12],[140,-15],[145,-15],[148,-20],[150,-25],[148,-30],[145,-35],[140,-38],[135,-35],[130,-33],[125,-33],[120,-30],[115,-25],[113,-22],[115,-15]],
+    greenland: [[-55,60],[-48,62],[-45,65],[-40,70],[-25,75],[-20,80],[-55,78],[-55,75],[-55,60]],
+  };
+
+  const COUNTRY_CENTROIDS: Record<string, [number,number]> = {
+    US:[-98,38], CA:[-106,56], MX:[-100,23], BR:[-55,-15], AR:[-63,-38], CL:[-71,-35],
+    CO:[-74,4], PE:[-76,-10], GB:[-3,55], FR:[2,46], DE:[10,51], IT:[12,42],
+    ES:[-4,40], PT:[-8,40], NL:[5,52], BE:[4,50], CH:[8,47], SE:[15,62],
+    NO:[10,62], DK:[10,56], PL:[20,52], CZ:[15,50], SK:[18,49], HU:[19,47],
+    RO:[25,46], BG:[25,43], GR:[22,39], AT:[14,48], IE:[-8,53], FI:[26,64],
+    LT:[24,55], LV:[25,57], EE:[26,59], RU:[40,60], UA:[31,49], BY:[28,54],
+    TR:[35,39], NG:[8,8], ZA:[26,-30], EG:[30,27], MA:[-7,32], KE:[38,0],
+    DZ:[3,28], TN:[10,34], LY:[17,26], SD:[30,15], GH:[-2,8], CN:[105,35],
+    JP:[138,38], IN:[78,20], KR:[128,37], TH:[101,15], VN:[107,14], ID:[120,-5],
+    PH:[123,12], MY:[102,4], SG:[104,1], PK:[70,30], BD:[90,24], IR:[54,32],
+    IQ:[44,33], SA:[45,24], AE:[55,24], IL:[35,31], JO:[36,31], KW:[48,29],
+    QA:[51,25], AU:[134,-25], NZ:[174,-41], UY:[-56,-32], PY:[-58,-23],
+    SI:[15,46], HR:[16,45], BA:[18,44], RS:[21,44], ME:[19,43], MK:[22,41],
+    AL:[20,41], MD:[29,47], AM:[45,40], GE:[43,42], AZ:[47,40], KZ:[68,48],
+    UZ:[64,42], TM:[60,40], KG:[74,41], TJ:[71,39], MN:[105,46], NP:[84,28],
+    BT:[90,27], LK:[80,7], MM:[96,22], KH:[105,13], LA:[102,18],
+  };
+
+  const LON2X = (lon: number) => (lon + 180) / 360 * 800;
+  const LAT2Y = (lat: number) => (90 - lat) / 180 * 400;
+
+  const fetchDashboard = async () => {
+    setDashLoading(true);
+    try {
+      const r = await apiFetch('/api/dashboard/stats');
+      if (r.ok) setDashboard(await r.json());
+    } catch {} finally { setDashLoading(false); }
+  };
+
+  const drawMap = useCallback(() => {
+    const canvas = mapRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const w = 800, h = 400;
+    canvas.width = w * 2; canvas.height = h * 2;
+    ctx.scale(2, 2);
+
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 0.5;
+    for (let lat = -90; lat <= 90; lat += 30) {
+      ctx.beginPath(); ctx.moveTo(0, LAT2Y(lat));
+      ctx.lineTo(w, LAT2Y(lat)); ctx.stroke();
+    }
+    for (let lon = -180; lon <= 180; lon += 30) {
+      ctx.beginPath(); ctx.moveTo(LON2X(lon), 0);
+      ctx.lineTo(LON2X(lon), h); ctx.stroke();
+    }
+
+    ctx.fillStyle = '#2a2a2a';
+    Object.values(CONTINENTS_DATA).forEach(pts => {
+      ctx.beginPath();
+      pts.forEach(([lon, lat], i) => {
+        const x = LON2X(lon), y = LAT2Y(lat);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.closePath(); ctx.fill();
+    });
+
+    if (dashboard && dashboard.by_country.length > 0) {
+      const maxC = Math.max(...dashboard.by_country.map(c => c.count));
+      dashboard.by_country.forEach(c => {
+        let cx = 0, cy = 0;
+        const cc = COUNTRY_CENTROIDS[c.code];
+        if (cc) { cx = LON2X(cc[0]); cy = LAT2Y(cc[1]); }
+        else if (c.lat && c.lon) { cx = LON2X(c.lon); cy = LAT2Y(c.lat); }
+        else return;
+        const r = 2 + (c.count / maxC) * 12;
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fillStyle = '#000'; ctx.fill();
+        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+        ctx.fillStyle = '#1a1a1a';
+        ctx.font = 'bold 8px Inter, sans-serif';
+        ctx.fillText(`${c.code} ${c.count}`, cx + r + 3, cy + 3);
+      });
+    }
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '7px Inter, sans-serif';
+    ctx.fillText('GYD · GLOBAL DEVICE MAP', 10, 12);
+  }, [dashboard]);
+
+  useEffect(() => {
+    if (activeTab === 'dashboard') drawMap();
+  }, [activeTab, dashboard, drawMap]);
+
+  const exportCSV = (results: ScanResultItem[]) => {
+    const header = 'IP,Port,URL,Device,Status,Username,Password,Country,Org,Lat,Lon\n';
+    const rows = results.map(r =>
+      `"${r.ip}",${r.port},"${r.url || ''}","${r.device || ''}",${r.auth_found ? 'CRED' : r.no_auth ? 'OPEN' : 'AUTH'},"${r.username || ''}","${r.password || ''}","${r.country_code || ''}","${r.org || ''}",${r.lat ?? ''},${r.lon ?? ''}`
+    ).join('\n');
+    const blob = new Blob([header + rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `gyd-scan-${Date.now()}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
   // Loading
   if (checking) {
     return (
@@ -529,6 +655,10 @@ export default function App() {
       <header className="header">
         <span className="logo">GYD</span>
         <nav className="nav">
+          <button className={`nav-btn ${activeTab === 'dashboard' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dashboard')}>
+            <BarChart size={14} /> Dashboard
+          </button>
           <button className={`nav-btn ${activeTab === 'scan' ? 'active' : ''}`}
             onClick={() => setActiveTab('scan')}>
             <Activity size={14} /> Scan
@@ -549,6 +679,101 @@ export default function App() {
       </header>
 
       <main className="page">
+
+        {/* ── Dashboard ── */}
+        <div className={`tab-panel ${activeTab === 'dashboard' ? 'active' : ''}`}>
+          {dashLoading && !dashboard && (
+            <div style={{ textAlign: 'center', padding: 60 }}>
+              <RefreshCw size={24} className="spin" color="var(--gray-400)" />
+              <p style={{ marginTop: 12, color: 'var(--gray-500)' }}>Loading dashboard data…</p>
+            </div>
+          )}
+          {dashboard && (
+            <div className="dash-grid">
+              {/* Stats cards */}
+              <div className="dash-cards">
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_scans}</div><div className="dash-stat-l">Scans</div></div>
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_results}</div><div className="dash-stat-l">Devices Found</div></div>
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_creds}</div><div className="dash-stat-l">Credentials</div></div>
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_open}</div><div className="dash-stat-l">Open</div></div>
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.countries_hit}</div><div className="dash-stat-l">Countries</div></div>
+                <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.unique_ips}</div><div className="dash-stat-l">Unique IPs</div></div>
+              </div>
+
+              {/* Map */}
+              <div className="dash-map-wrap">
+                <canvas ref={mapRef} className="dash-map" />
+              </div>
+
+              {/* Bottom row */}
+              <div className="dash-bottom">
+                {/* Country breakdown */}
+                <div className="dash-panel">
+                  <div className="dash-panel-title">Top Countries</div>
+                  <div className="dash-panel-body">
+                    {dashboard.by_country.slice(0, 15).map(c => (
+                      <div key={c.code} className="dash-country-row">
+                        <span className="dash-country-code">{c.code || '??'}</span>
+                        <div className="dash-country-bar-wrap">
+                          <div className="dash-country-bar" style={{ width: `${(c.count / Math.max(...dashboard.by_country.map(x => x.count))) * 100}%` }} />
+                        </div>
+                        <span className="dash-country-count">{c.count}</span>
+                        {c.creds > 0 && <span className="dash-country-creds">+{c.creds}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Port distribution */}
+                <div className="dash-panel">
+                  <div className="dash-panel-title">Port Distribution</div>
+                  <div className="dash-panel-body">
+                    {dashboard.by_port.slice(0, 10).map(p => {
+                      const maxCount = Math.max(...dashboard.by_port.map(x => x.count));
+                      return (
+                        <div key={p.port} className="dash-port-row">
+                          <span className="dash-port-n">{p.port}</span>
+                          <div className="dash-country-bar-wrap">
+                            <div className="dash-port-bar" style={{ width: `${(p.count / maxCount) * 100}%` }} />
+                          </div>
+                          <span className="dash-country-count">{p.count}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Recent activity */}
+                <div className="dash-panel">
+                  <div className="dash-panel-title">Recent Finds</div>
+                  <div className="dash-panel-body">
+                    {dashboard.recent.length === 0 ? (
+                      <div className="empty" style={{ padding: 20 }}><p>No recent finds</p></div>
+                    ) : (
+                      dashboard.recent.map((r, i) => (
+                        <div key={i} className="dash-recent-item">
+                          <span className={`badge ${r.auth_found ? 'cred' : r.no_auth ? 'open' : 'auth'}`}>
+                            {r.auth_found ? 'CRED' : r.no_auth ? 'OPEN' : 'AUTH'}
+                          </span>
+                          <span className="dash-recent-ip">{r.ip}:{r.port}</span>
+                          <span className="dash-recent-device">{r.device || ''}</span>
+                          {r.country_code && <span className="dash-recent-cc">{r.country_code}</span>}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {!dashLoading && !dashboard && (
+            <div className="empty" style={{ padding: 60 }}>
+              <BarChart size={36} />
+              <h3>No Data Yet</h3>
+              <p>Run a scan to see your dashboard with map and statistics.</p>
+            </div>
+          )}
+        </div>
 
         {/* ── Scan ── */}
         <div className={`tab-panel ${activeTab === 'scan' ? 'active' : ''}`}>
@@ -675,8 +900,13 @@ export default function App() {
 
               {/* Table */}
               <div className="card" style={{ padding: 0 }}>
-                <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--gray-200)' }}>
+                <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--gray-200)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div className="card-title" style={{ marginBottom: 0 }}>Results</div>
+                  {scanResults.length > 0 && (
+                    <button className="btn outline sm" onClick={() => exportCSV(scanResults)}>
+                      <Download size={11} /> CSV
+                    </button>
+                  )}
                 </div>
                 {scanResults.length === 0 ? (
                   <div className="empty">

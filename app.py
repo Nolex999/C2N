@@ -636,6 +636,64 @@ def app_spa():
         return app.send_static_file('index.html')
     return "Frontend not built. Please run 'npm run build-all' in the root directory.", 404
 
+# ─────────────── Dashboard stats ───────────────
+
+@app.route("/api/dashboard/stats", methods=["GET"])
+@require_auth
+def api_dashboard_stats(user):
+    try:
+        scans = supabase.table("scan_results").select("*").eq("user_id", user.id).order("created_at", desc=True).limit(100).execute()
+        total_scans = len(scans.data)
+        total_results = sum(r.get("results_count", 0) for r in scans.data)
+        total_creds = sum(r.get("creds_count", 0) for r in scans.data)
+        total_open = sum(r.get("open_count", 0) for r in scans.data)
+        scan_ids = [str(r["id"]) for r in scans.data if r.get("results_count", 0) > 0]
+        by_country = {}
+        by_port = {}
+        recent_items = []
+        if scan_ids:
+            items = supabase.table("scan_result_items").select("*").in_("result_id", scan_ids).order("item_index", desc=True).limit(2000).execute()
+            seen_ips = set()
+            countries_set = set()
+            for it in items.data:
+                cc = it.get("country_code") or ""
+                if cc:
+                    countries_set.add(cc)
+                    if cc not in by_country:
+                        by_country[cc] = {"code": cc, "count": 0, "creds": 0, "open": 0, "lat": it.get("lat"), "lon": it.get("lon")}
+                    by_country[cc]["count"] += 1
+                    if it.get("auth_found"): by_country[cc]["creds"] += 1
+                    if it.get("no_auth"): by_country[cc]["open"] += 1
+                port = it.get("port")
+                if port:
+                    ps = str(port)
+                    by_port[ps] = by_port.get(ps, 0) + 1
+                if it.get("ip"): seen_ips.add(it.get("ip"))
+                if len(recent_items) < 20:
+                    recent_items.append({
+                        "ip": it.get("ip"), "port": it.get("port"),
+                        "device": it.get("device"), "country_code": it.get("country_code"),
+                        "auth_found": it.get("auth_found"), "no_auth": it.get("no_auth"),
+                        "url": it.get("url"),
+                    })
+        country_list = sorted(by_country.values(), key=lambda x: x["count"], reverse=True)
+        port_list = sorted([{"port": int(k), "count": v} for k, v in by_port.items()], key=lambda x: x["count"], reverse=True)
+        return jsonify({
+            "stats": {
+                "total_scans": total_scans,
+                "total_results": total_results,
+                "total_creds": total_creds,
+                "total_open": total_open,
+                "countries_hit": len(countries_set),
+                "unique_ips": len(seen_ips),
+            },
+            "by_country": country_list[:30],
+            "by_port": port_list[:20],
+            "recent": recent_items,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/health")
 def api_health():
     return jsonify({

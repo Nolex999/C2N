@@ -983,3 +983,227 @@ tbody tr.open td { border-left: 3px solid var(--orange); }
 }
 
 .loading-screen p { font-size: 13px; color: var(--gray-500); }
+
+/* ═══════ DASHBOARD ═══════ */
+
+.dash-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.dash-cards {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 900px) { .dash-cards { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 500px) { .dash-cards { grid-template-columns: repeat(2, 1fr); } }
+
+.dash-stat {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  padding: 18px 12px;
+  text-align: center;
+  box-shadow: var(--shadow-sm);
+}
+
+.dash-stat-n {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--black);
+}
+
+.dash-stat-l {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--gray-400);
+  margin-top: 4px;
+}
+
+/* Map */
+.dash-map-wrap {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+}
+
+.dash-map {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 1;
+  max-height: 420px;
+  image-rendering: crisp-edges;
+}
+
+/* Bottom row */
+.dash-bottom {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+}
+
+@media (max-width: 1024px) { .dash-bottom { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 600px) { .dash-bottom { grid-template-columns: 1fr; } }
+
+.dash-panel {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.dash-panel-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--gray-400);
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--gray-200);
+  background: var(--gray-50);
+}
+
+.dash-panel-body {
+  padding: 8px 14px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+/* Country rows */
+.dash-country-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--gray-100);
+  font-size: 12px;
+}
+
+.dash-country-row:last-child { border-bottom: none; }
+
+.dash-country-code {
+  width: 28px;
+  font-weight: 700;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--black);
+  flex-shrink: 0;
+}
+
+.dash-country-bar-wrap {
+  flex: 1;
+  height: 14px;
+  background: var(--gray-100);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.dash-country-bar {
+  height: 100%;
+  background: var(--black);
+  border-radius: 3px;
+  transition: width .4s ease;
+  min-width: 2px;
+}
+
+.dash-country-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--gray-700);
+  width: 30px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.dash-country-creds {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--green);
+  flex-shrink: 0;
+}
+
+/* Port rows */
+.dash-port-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--gray-100);
+  font-size: 12px;
+}
+
+.dash-port-row:last-child { border-bottom: none; }
+
+.dash-port-n {
+  width: 40px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--black);
+  flex-shrink: 0;
+}
+
+.dash-port-bar {
+  height: 100%;
+  background: var(--gray-600);
+  border-radius: 3px;
+  transition: width .4s ease;
+  min-width: 2px;
+}
+
+/* Recent items */
+.dash-recent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--gray-100);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.dash-recent-item:last-child { border-bottom: none; }
+
+.dash-recent-item .badge {
+  font-size: 7px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.dash-recent-ip {
+  font-weight: 600;
+  color: var(--black);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dash-recent-device {
+  color: var(--gray-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  font-size: 10px;
+}
+
+.dash-recent-cc {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--gray-500);
+  flex-shrink: 0;
+  font-family: var(--font);
+}
