@@ -35,6 +35,10 @@ except ImportError:
 exploit_sessions = {}
 exploit_lock = threading.Lock()
 
+scan_jobs = {}
+scan_jobs_lock = threading.RLock()
+SCAN_JOB_TTL_SECONDS = 6 * 60 * 60
+
 def get_exploit_session(sid):
     with exploit_lock:
         return exploit_sessions.get(sid)
@@ -88,6 +92,201 @@ def require_auth(f):
             return jsonify({"error": "unauthorized"}), 401
         return f(user=user, *a, **kw)
     return wrapper
+
+def scan_job_log(job, message, type_="info"):
+    with job["lock"]:
+        job["logs"].append({
+            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "message": message,
+            "type": type_,
+        })
+
+def scan_job_snapshot(job):
+    with job["lock"]:
+        results = list(job.get("results", []))
+        return {
+            "id": job["id"],
+            "status": job["status"],
+            "created_at": job["created_at"],
+            "started_at": job.get("started_at"),
+            "completed_at": job.get("completed_at"),
+            "total": job.get("total", 0),
+            "scanned": job.get("scanned", 0),
+            "results_count": len(results),
+            "creds_count": sum(1 for r in results if r.get("auth_found")),
+            "open_count": sum(1 for r in results if r.get("no_auth")),
+            "region": job.get("region"),
+            "ports": job.get("ports"),
+            "max_ips": job.get("max_ips"),
+            "threads": job.get("threads"),
+            "country": job.get("country"),
+            "geo": job.get("geo"),
+            "result_id": job.get("result_id"),
+            "error": job.get("error"),
+            "results": results,
+            "logs": list(job.get("logs", [])),
+        }
+
+def cleanup_scan_jobs():
+    cutoff = time.time() - SCAN_JOB_TTL_SECONDS
+    with scan_jobs_lock:
+        for job_id, job in list(scan_jobs.items()):
+            finished_ts = job.get("finished_ts")
+            if finished_ts and finished_ts < cutoff:
+                scan_jobs.pop(job_id, None)
+
+def get_scan_job_for_user(job_id, user_id):
+    with scan_jobs_lock:
+        job = scan_jobs.get(job_id)
+    if not job or job.get("user_id") != user_id:
+        return None
+    return job
+
+def save_scan_results(user_id, total_scanned, results, region, ports):
+    if not results:
+        return None
+    creds_count = sum(1 for r in results if r.get("auth_found"))
+    open_count = sum(1 for r in results if r.get("no_auth"))
+    scan_resp = supabase.table("scan_results").insert({
+        "user_id": user_id,
+        "total_scanned": total_scanned,
+        "results_count": len(results),
+        "creds_count": creds_count,
+        "open_count": open_count,
+        "region": region or "internet",
+        "ports": ports,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+    result_id = scan_resp.data[0]["id"]
+    items = []
+    for i, r in enumerate(results):
+        items.append({
+            "result_id": str(result_id),
+            "item_index": i,
+            "ip": r.get("ip"), "port": r.get("port"),
+            "url": r.get("url"), "device": r.get("device"),
+            "no_auth": r.get("no_auth"), "auth_found": r.get("auth_found"),
+            "username": r.get("username"), "password": r.get("password"),
+            "note": r.get("note"), "status_code": r.get("status_code"),
+            "country": r.get("country"), "country_code": r.get("country_code"),
+            "region_name": r.get("region"), "city": r.get("city"),
+            "lat": r.get("lat"), "lon": r.get("lon"),
+            "org": r.get("org"), "isp": r.get("isp"),
+            "as_info": r.get("as"),
+            "broken": False,
+        })
+    supabase.table("scan_result_items").insert(items).execute()
+    return str(result_id)
+
+def run_scan_job(job_id):
+    with scan_jobs_lock:
+        job = scan_jobs.get(job_id)
+    if not job:
+        return
+
+    try:
+        from GetYourDevice import (
+            generate_region_ips, generate_internet_ips, generate_ips,
+            scan_single, SCAN_PORTS, ALL_PORTS, GeoEnricher, REGION_CONFIG
+        )
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        target = job.get("target", "")
+        region = job.get("region", "")
+        max_ips = int(job.get("max_ips", 500))
+        threads = int(job.get("threads", 10))
+        ports = job.get("ports", "fast")
+        country = job.get("country")
+        do_geo = bool(job.get("geo"))
+
+        selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
+        include_countries = None
+        if country:
+            include_countries = set(c.strip().upper() for c in country.split(",") if c.strip())
+
+        if region and region in REGION_CONFIG:
+            ips = generate_region_ips(region, max_ips, include_countries=include_countries)
+        elif target:
+            ips = generate_ips(target, max_ips)
+        else:
+            ips = generate_internet_ips(max_ips)
+
+        with job["lock"]:
+            job["status"] = "running"
+            job["started_at"] = datetime.now(timezone.utc).isoformat()
+            job["total"] = len(ips)
+        scan_job_log(job, f"Starting scan - {len(ips)} targets", "info")
+
+        pool = ThreadPoolExecutor(max_workers=min(threads, 50))
+        futures = {}
+        cancelled = False
+        try:
+            futures = {pool.submit(scan_single, ip, False, selected_ports): ip for ip in ips}
+            for fut in as_completed(futures):
+                if job["cancel"].is_set():
+                    cancelled = True
+                    break
+                ip = futures[fut]
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                with job["lock"]:
+                    job["scanned"] += 1
+                    if res:
+                        job["results"].extend(res)
+                        for r in res:
+                            if r.get("auth_found"):
+                                scan_job_log(job, f"Found: {r.get('url')} - {r.get('username')}:{r.get('password')} [{r.get('device')}]", "hit")
+                            elif r.get("no_auth"):
+                                scan_job_log(job, f"Open: {r.get('url')} [{r.get('device')}]", "hit-open")
+        finally:
+            pool.shutdown(wait=not cancelled, cancel_futures=cancelled)
+
+        if job["cancel"].is_set():
+            with job["lock"]:
+                job["status"] = "stopped"
+            scan_job_log(job, "Scan stopped.", "info")
+        else:
+            if do_geo:
+                with job["lock"]:
+                    results_for_geo = list(job["results"])
+                if results_for_geo:
+                    scan_job_log(job, "Adding geolocation data...", "info")
+                    geo_ips = list(set(r["ip"] for r in results_for_geo))
+                    geo_data = GeoEnricher.enrich_batch(geo_ips)
+                    with job["lock"]:
+                        for r in job["results"]:
+                            r.update(geo_data.get(r["ip"], {}))
+            with job["lock"]:
+                job["status"] = "complete"
+            scan_job_log(job, "Scan complete.", "info")
+
+        with job["lock"]:
+            final_results = list(job["results"])
+            final_status = job["status"]
+            total = job.get("total", 0)
+        try:
+            result_id = save_scan_results(job["user_id"], total, final_results, region, ports)
+            if result_id:
+                with job["lock"]:
+                    job["result_id"] = result_id
+                scan_job_log(job, "Results saved.", "info")
+        except Exception as e:
+            print(f"[!] Job scan DB save error: {e}")
+            scan_job_log(job, f"Save error: {e}", "err")
+
+        with job["lock"]:
+            job["status"] = final_status
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            job["finished_ts"] = time.time()
+    except Exception as e:
+        with job["lock"]:
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["completed_at"] = datetime.now(timezone.utc).isoformat()
+            job["finished_ts"] = time.time()
+        scan_job_log(job, f"Scan error: {e}", "err")
 
 # ─────────────── Auth routes ───────────────
 # Frontend sends email+password, backend handles Supabase Auth
@@ -849,27 +1048,27 @@ def api_scan(user):
                 res = fut.result()
                 if res:
                     with results_lock:
-                        results.extend(res)
+                        all_results.extend(res)
             except Exception:
                 pass
 
-    if do_geo and results:
-        geo_ips = list(set(r["ip"] for r in results))
+    if do_geo and all_results:
+        geo_ips = list(set(r["ip"] for r in all_results))
         geo_data = GeoEnricher.enrich_batch(geo_ips)
-        for r in results:
+        for r in all_results:
             g = geo_data.get(r["ip"], {})
             r.update(g)
 
     uid = user.id
-    creds_count = sum(1 for r in results if r.get("auth_found"))
-    open_count = sum(1 for r in results if r.get("no_auth"))
+    creds_count = sum(1 for r in all_results if r.get("auth_found"))
+    open_count = sum(1 for r in all_results if r.get("no_auth"))
 
-    if results:
+    if all_results:
         try:
             scan_resp = supabase.table("scan_results").insert({
                 "user_id": uid,
                 "total_scanned": len(ips),
-                "results_count": len(results),
+                "results_count": len(all_results),
                 "creds_count": creds_count,
                 "open_count": open_count,
                 "region": region or "internet",
@@ -878,7 +1077,7 @@ def api_scan(user):
             }).execute()
             result_id = scan_resp.data[0]["id"]
             items = []
-            for i, r in enumerate(results):
+            for i, r in enumerate(all_results):
                 items.append({
                     "result_id": str(result_id),
                     "item_index": i,
@@ -901,9 +1100,86 @@ def api_scan(user):
     return jsonify({
         "status": "ok",
         "total_scanned": len(ips),
-        "results_count": len(results),
-        "results": results,
+        "results_count": len(all_results),
+        "results": all_results,
     })
+
+@app.route("/api/scan/jobs", methods=["POST"])
+@require_auth
+def api_scan_start_job(user):
+    cleanup_scan_jobs()
+    body = request.get_json(force=True) or {}
+    job_id = uuid.uuid4().hex
+    region = body.get("region", "")
+    if body.get("internet"):
+        region = "internet"
+    job = {
+        "id": job_id,
+        "user_id": user.id,
+        "status": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": None,
+        "completed_at": None,
+        "finished_ts": None,
+        "total": 0,
+        "scanned": 0,
+        "results": [],
+        "logs": [],
+        "error": None,
+        "result_id": None,
+        "target": body.get("target", ""),
+        "region": region,
+        "max_ips": int(body.get("max_ips", 500)),
+        "threads": int(body.get("threads", 10)),
+        "ports": body.get("ports", "fast"),
+        "country": body.get("country"),
+        "geo": bool(body.get("geo", False)),
+        "cancel": threading.Event(),
+        "lock": threading.RLock(),
+    }
+    with scan_jobs_lock:
+        scan_jobs[job_id] = job
+    thread = threading.Thread(target=run_scan_job, args=(job_id,), daemon=True)
+    job["thread"] = thread
+    thread.start()
+    return jsonify(scan_job_snapshot(job)), 202
+
+@app.route("/api/scan/jobs/active", methods=["GET"])
+@require_auth
+def api_scan_active_job(user):
+    cleanup_scan_jobs()
+    active_statuses = {"queued", "running", "stopping"}
+    with scan_jobs_lock:
+        jobs = [
+            job for job in scan_jobs.values()
+            if job.get("user_id") == user.id and job.get("status") in active_statuses
+        ]
+    if not jobs:
+        return jsonify({"job": None})
+    jobs.sort(key=lambda j: j.get("created_at") or "", reverse=True)
+    return jsonify({"job": scan_job_snapshot(jobs[0])})
+
+@app.route("/api/scan/jobs/<job_id>", methods=["GET"])
+@require_auth
+def api_scan_job_status(user, job_id):
+    cleanup_scan_jobs()
+    job = get_scan_job_for_user(job_id, user.id)
+    if not job:
+        return jsonify({"error": "scan job not found"}), 404
+    return jsonify(scan_job_snapshot(job))
+
+@app.route("/api/scan/jobs/<job_id>/stop", methods=["POST"])
+@require_auth
+def api_scan_stop_job(user, job_id):
+    job = get_scan_job_for_user(job_id, user.id)
+    if not job:
+        return jsonify({"error": "scan job not found"}), 404
+    with job["lock"]:
+        if job["status"] in ("queued", "running"):
+            job["status"] = "stopping"
+            job["cancel"].set()
+            scan_job_log(job, "Stopping...", "info")
+    return jsonify(scan_job_snapshot(job))
 
 @app.route("/api/scan/stream", methods=["POST"])
 @require_auth
@@ -1168,6 +1444,9 @@ def api_health():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    debug = os.environ.get("VERCEL") != "1"
-    print(f"[*] GYD on Supabase — http://0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    worker_mode = os.environ.get("GYD_PYTHON_WORKER") == "1"
+    host = os.environ.get("HOST") or ("127.0.0.1" if worker_mode else "0.0.0.0")
+    debug = os.environ.get("FLASK_DEBUG") == "1" and not worker_mode
+    role = "worker" if worker_mode else "web"
+    print(f"[*] GYD Python {role} on http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug, use_reloader=False)

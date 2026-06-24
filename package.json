@@ -4,7 +4,14 @@
   "private": true,
   "scripts": {
     "install-all": "npm install --prefix frontend",
-    "build-all": "npm run build --prefix frontend",
-    "dev-frontend": "npm run dev --prefix frontend"
+    "build-all": "npm run build --prefix frontend && npm run build-server",
+    "build-server": "tsc -p server/tsconfig.json",
+    "dev-frontend": "npm run dev --prefix frontend",
+    "start": "node server/dist/web-server.js",
+    "start-worker": "python app.py"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.3",
+    "typescript": "~6.0.2"
   }
 }

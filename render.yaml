@@ -2,11 +2,13 @@ services:
   - type: web
     name: c2-scanner
     runtime: python
-    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 600 --worker-class sync
+    buildCommand: pip install -r requirements.txt && npm install && npm run install-all && npm run build-all
+    startCommand: npm start
     envVars:
       - key: PORT
         value: 10000
+      - key: PY_WORKER_PORT
+        value: 10001
       - key: C2_DATA_DIR
         value: /tmp
       - key: RENDER

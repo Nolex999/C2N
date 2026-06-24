@@ -8,6 +8,65 @@ import {
 } from 'lucide-react';
 
 const TOKEN_KEY = 'gyd_token';
+const ACTIVE_TAB_KEY = 'gyd_active_tab';
+const SCAN_SETTINGS_KEY = 'gyd_scan_settings';
+const ACTIVE_SCAN_JOB_KEY = 'gyd_active_scan_job';
+
+type AppTab = 'dashboard' | 'scan' | 'output' | 'invites' | 'devices' | 'settings';
+const APP_TABS: AppTab[] = ['dashboard', 'scan', 'output', 'invites', 'devices', 'settings'];
+
+interface StoredScanSettings {
+  region: string;
+  maxIps: number;
+  batchSize: number;
+  threads: number;
+  ports: string;
+  countryFilter: string;
+  geoEnrich: boolean;
+}
+
+const DEFAULT_SCAN_SETTINGS: StoredScanSettings = {
+  region: 'worldwide',
+  maxIps: 200,
+  batchSize: 50,
+  threads: 20,
+  ports: 'fast',
+  countryFilter: '',
+  geoEnrich: true,
+};
+
+const readJson = <T,>(key: string, fallback: T): T => {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const readScanSettings = (): StoredScanSettings => {
+  const stored = readJson<StoredScanSettings>(SCAN_SETTINGS_KEY, DEFAULT_SCAN_SETTINGS);
+  return {
+    ...DEFAULT_SCAN_SETTINGS,
+    ...stored,
+    maxIps: Number(stored.maxIps) || DEFAULT_SCAN_SETTINGS.maxIps,
+    batchSize: Number(stored.batchSize) || DEFAULT_SCAN_SETTINGS.batchSize,
+    threads: Number(stored.threads) || DEFAULT_SCAN_SETTINGS.threads,
+    geoEnrich: Boolean(stored.geoEnrich),
+  };
+};
+
+const readActiveTab = (): AppTab => {
+  const stored = localStorage.getItem(ACTIVE_TAB_KEY) as AppTab | null;
+  return stored && APP_TABS.includes(stored) ? stored : 'dashboard';
+};
+
+const isLiveScanStatus = (status?: string) => status === 'queued' || status === 'running' || status === 'stopping';
+
+const formatElapsed = (startedAt: number, endedAt = Date.now()) => {
+  const seconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+};
 
 interface UserInfo { email: string; username: string; uid: string; }
 
@@ -44,11 +103,33 @@ interface DashboardStats { total_scans: number; total_results: number; total_cre
 interface DashboardGeoPoint { lat: number; lon: number; ip: string; port: number; device: string; country_code?: string; org?: string; isp?: string; as_info?: string; url?: string; auth_found?: boolean; no_auth?: boolean; username?: string; password?: string; }
 interface DashboardData { stats: DashboardStats; by_country: DashboardCountry[]; by_port: DashboardPort[]; recent: any[]; geo_points: DashboardGeoPoint[]; }
 
+interface ScanJobSnapshot {
+  id: string;
+  status: 'queued' | 'running' | 'stopping' | 'stopped' | 'complete' | 'error';
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  total?: number;
+  scanned?: number;
+  results_count?: number;
+  region?: string;
+  ports?: string;
+  max_ips?: number;
+  threads?: number;
+  country?: string | null;
+  geo?: boolean;
+  result_id?: string | null;
+  error?: string | null;
+  results?: ScanResultItem[];
+  logs?: LogLine[];
+}
+
 export default function App() {
+  const initialScanSettings = readScanSettings();
   const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState<UserInfo | null>(null);
   const [checking, setChecking] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'scan' | 'output' | 'invites' | 'devices' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<AppTab>(() => readActiveTab());
   const [inviteOnly, setInviteOnly] = useState(true);
 
   // Auth
@@ -60,24 +141,26 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
 
   // Scan settings
-  const [region, setRegion] = useState('worldwide');
-  const [maxIps, setMaxIps] = useState(200);
-  const [batchSize, setBatchSize] = useState(50);
-  const [threads, setThreads] = useState(20);
-  const [ports, setPorts] = useState('fast');
-  const [countryFilter, setCountryFilter] = useState('');
-  const [geoEnrich, setGeoEnrich] = useState(true);
+  const [region, setRegion] = useState(initialScanSettings.region);
+  const [maxIps, setMaxIps] = useState(initialScanSettings.maxIps);
+  const [batchSize, setBatchSize] = useState(initialScanSettings.batchSize);
+  const [threads, setThreads] = useState(initialScanSettings.threads);
+  const [ports, setPorts] = useState(initialScanSettings.ports);
+  const [countryFilter, setCountryFilter] = useState(initialScanSettings.countryFilter);
+  const [geoEnrich, setGeoEnrich] = useState(initialScanSettings.geoEnrich);
 
   // Scan state
   const [scanning, setScanning] = useState(false);
-  const setStopping = useState(false)[1];
+  const [stopping, setStopping] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(() => localStorage.getItem(ACTIVE_SCAN_JOB_KEY));
   const [totalScanned, setTotalScanned] = useState(0);
+  const [scanTotal, setScanTotal] = useState(0);
   const [totalResponded, setTotalResponded] = useState(0);
   const [scanResults, setScanResults] = useState<ScanResultItem[]>([]);
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [elapsed, setElapsed] = useState('0:00');
   const stoppedRef = useRef(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const pollRef = useRef<any>(null);
   const timerRef = useRef<any>(null);
   const startRef = useRef<number | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -178,6 +261,21 @@ export default function App() {
   }, [token]);
 
   useEffect(() => {
+    localStorage.setItem(ACTIVE_TAB_KEY, activeTab);
+  }, [activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem(SCAN_SETTINGS_KEY, JSON.stringify({
+      region, maxIps, batchSize, threads, ports, countryFilter, geoEnrich,
+    }));
+  }, [region, maxIps, batchSize, threads, ports, countryFilter, geoEnrich]);
+
+  useEffect(() => {
+    if (activeJobId) localStorage.setItem(ACTIVE_SCAN_JOB_KEY, activeJobId);
+    else localStorage.removeItem(ACTIVE_SCAN_JOB_KEY);
+  }, [activeJobId]);
+
+  useEffect(() => {
     if (token && activeTab === 'dashboard') fetchDashboard();
     if (token && activeTab === 'output') fetchOutputs();
     if (token && activeTab === 'invites') fetchInvites();
@@ -235,6 +333,10 @@ export default function App() {
   const doLogout = () => {
     fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
     localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(ACTIVE_SCAN_JOB_KEY);
+    stopPolling();
+    stopTimer();
+    setActiveJobId(null);
     setToken(null);
     setUser(null);
     setActiveTab('scan');
@@ -248,9 +350,106 @@ export default function App() {
 
   const tickTimer = () => {
     if (startRef.current) {
-      const s = Math.floor((Date.now() - startRef.current) / 1000);
-      setElapsed(`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`);
+      setElapsed(formatElapsed(startRef.current));
     }
+  };
+
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  const ensureTimer = () => {
+    if (!timerRef.current) {
+      timerRef.current = setInterval(tickTimer, 1000);
+    }
+  };
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  const applyScanJob = (job: ScanJobSnapshot) => {
+    const live = isLiveScanStatus(job.status);
+    const results = job.results || [];
+    const total = job.total || job.max_ips || maxIps;
+
+    setActiveJobId(job.id);
+    setScanning(live);
+    setStopping(job.status === 'stopping');
+    setTotalScanned(job.scanned || 0);
+    setScanTotal(total);
+    setTotalResponded(job.results_count ?? results.length);
+    setScanResults(results);
+    setLogs(job.logs || []);
+
+    if (job.region) setRegion(job.region);
+    if (job.max_ips) setMaxIps(job.max_ips);
+    if (job.threads) setThreads(job.threads);
+    if (job.ports) setPorts(job.ports);
+    if (typeof job.geo === 'boolean') setGeoEnrich(job.geo);
+    if (job.country !== undefined) setCountryFilter(job.country || '');
+
+    if (job.started_at) {
+      const started = Date.parse(job.started_at);
+      if (!Number.isNaN(started)) {
+        startRef.current = started;
+        const completed = job.completed_at ? Date.parse(job.completed_at) : undefined;
+        setElapsed(formatElapsed(started, completed && !Number.isNaN(completed) ? completed : Date.now()));
+      }
+    }
+
+    if (live) {
+      ensureTimer();
+    } else {
+      stopTimer();
+      stoppedRef.current = false;
+    }
+  };
+
+  const syncScanJob = async (jobId: string, notify = true) => {
+    try {
+      const r = await apiFetch(`/api/scan/jobs/${jobId}`);
+      if (r.status === 404) {
+        stopPolling();
+        setActiveJobId(null);
+        setScanning(false);
+        setStopping(false);
+        addLog('Saved scan job is no longer available on this server.', 'err');
+        return null;
+      }
+      if (!r.ok) return null;
+      const job: ScanJobSnapshot = await r.json();
+      applyScanJob(job);
+      if (!isLiveScanStatus(job.status)) {
+        stopPolling();
+        if (job.status === 'complete') {
+          fetchOutputs();
+          fetchDashboard();
+          if (notify && job.results_count !== undefined) {
+            toast(`Scan complete: ${job.results_count} results`, 'success');
+          }
+        } else if (notify && job.status === 'error') {
+          toast(job.error || 'Scan failed', 'error');
+        }
+      }
+      return job;
+    } catch (err: any) {
+      addLog(`Scan sync error: ${err.message}`, 'err');
+      return null;
+    }
+  };
+
+  const startPolling = (jobId: string) => {
+    stopPolling();
+    pollRef.current = setInterval(() => {
+      void syncScanJob(jobId);
+    }, 1200);
   };
 
   const startScan = async () => {
@@ -258,16 +457,17 @@ export default function App() {
     setScanning(true);
     setStopping(false);
     stoppedRef.current = false;
-    abortRef.current = new AbortController();
+    stopPolling();
     setTotalScanned(0);
+    setScanTotal(maxIps);
     setTotalResponded(0);
     setScanResults([]);
     setLogs([]);
     startRef.current = Date.now();
     setElapsed('0:00');
-    timerRef.current = setInterval(tickTimer, 1000);
+    ensureTimer();
 
-    addLog(`Starting scan — ${maxIps} targets (streaming)`, 'info');
+    addLog(`Starting scan - ${maxIps} targets`, 'info');
 
     try {
       const body: any = { max_ips: maxIps, threads, ports, geo: geoEnrich };
@@ -275,81 +475,92 @@ export default function App() {
       else body.region = region;
       if (countryFilter.trim()) body.country = countryFilter.trim();
 
-      const response = await apiFetch('/api/scan/stream', {
+      const response = await apiFetch('/api/scan/jobs', {
         method: 'POST',
         body: JSON.stringify(body),
-        signal: abortRef.current?.signal,
       });
-      if (!response.ok) { addLog('Scan request failed', 'err'); return; }
-
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let eventType = '';
-      let dataStr = '';
-
-      const flushEvent = () => {
-        if (!dataStr) return;
-        try {
-          const data = JSON.parse(dataStr);
-          if (eventType === 'start') {
-            setTotalScanned(0);
-          } else if (eventType === 'hit') {
-            const results: ScanResultItem[] = data.results || [];
-            setTotalResponded(p => p + results.length);
-            setScanResults(prev => [...prev, ...results]);
-            results.forEach((r: ScanResultItem) => {
-              if (r.auth_found) addLog(`Found: ${r.url} — ${r.username}:${r.password} [${r.device}]`, 'hit');
-              else if (r.no_auth) addLog(`Open: ${r.url} [${r.device}]`, 'hit-open');
-            });
-          } else if (eventType === 'progress') {
-            setTotalScanned(data.scanned);
-          } else if (eventType === 'done') {
-            addLog(`Scan complete — ${data.results_count} results from ${data.total_scanned} IPs`, 'info');
-            toast(`Scan complete: ${data.results_count} results`, 'success');
-          }
-        } catch (e) { /* skip parse errors */ }
-        dataStr = '';
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) { flushEvent(); break; }
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split('\n');
-        buffer = parts.pop() || '';
-        for (const line of parts) {
-          if (line.startsWith('event: ')) {
-            flushEvent();
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            dataStr = line.slice(6);
-          }
-        }
+      if (!response.ok) {
+        addLog('Scan request failed', 'err');
+        setScanning(false);
+        setStopping(false);
+        stopTimer();
+        return;
       }
+      const job: ScanJobSnapshot = await response.json();
+      applyScanJob(job);
+      startPolling(job.id);
     } catch (err: any) {
-      if (err.name === 'AbortError') { addLog('Scan aborted.', 'info'); }
-      else { addLog(`Scan error: ${err.message}`, 'err'); }
+      addLog(`Scan error: ${err.message}`, 'err');
+      setScanning(false);
+      setStopping(false);
+      stopTimer();
     }
-
-    setScanning(false);
-    setStopping(false);
-    clearInterval(timerRef.current);
   };
 
-  const stopScan = () => {
+  const stopScan = async () => {
     if (stoppedRef.current) return; // prevent duplicate calls
     stoppedRef.current = true;
     setStopping(true);
-    abortRef.current?.abort(); // cancel the in-flight HTTP request immediately
-    addLog('Stopping…', 'info');
+    addLog('Stopping...', 'info');
+    if (!activeJobId) {
+      setScanning(false);
+      setStopping(false);
+      return;
+    }
+    try {
+      const r = await apiFetch(`/api/scan/jobs/${activeJobId}/stop`, { method: 'POST' });
+      if (r.ok) applyScanJob(await r.json());
+    } catch (err: any) {
+      addLog(`Stop error: ${err.message}`, 'err');
+      setStopping(false);
+    }
   };
 
   const clearScan = () => {
     if (scanning) return;
+    stopPolling();
+    stopTimer();
+    setActiveJobId(null);
+    startRef.current = null;
+    stoppedRef.current = false;
     setScanResults([]); setTotalScanned(0); setTotalResponded(0);
-    setLogs([]); setElapsed('0:00');
+    setScanTotal(0); setLogs([]); setElapsed('0:00');
   };
+
+  useEffect(() => {
+    if (!token || checking) return;
+    let cancelled = false;
+
+    const restoreScanJob = async () => {
+      const savedJobId = localStorage.getItem(ACTIVE_SCAN_JOB_KEY);
+      if (savedJobId) {
+        const restored = await syncScanJob(savedJobId, false);
+        if (!cancelled && restored && isLiveScanStatus(restored.status)) startPolling(savedJobId);
+        return;
+      }
+
+      try {
+        const r = await apiFetch('/api/scan/jobs/active');
+        if (!r.ok) return;
+        const data = await r.json();
+        if (!cancelled && data.job) {
+          applyScanJob(data.job);
+          startPolling(data.job.id);
+          setActiveTab('scan');
+        }
+      } catch {}
+    };
+
+    void restoreScanJob();
+    return () => { cancelled = true; };
+  }, [token, checking]);
+
+  useEffect(() => {
+    return () => {
+      stopPolling();
+      stopTimer();
+    };
+  }, []);
 
   // History
   const fetchOutputs = async () => {
@@ -735,6 +946,7 @@ export default function App() {
   };
 
   // Filtered results
+  const progressTotal = Math.max(scanTotal || maxIps || 1, totalScanned, 1);
   const filteredResults = scanResults
     .map((r, i) => ({ ...r, _idx: i }))
     .filter(r => {
@@ -781,8 +993,11 @@ export default function App() {
 
   const clearAllData = () => {
     if (!confirm('Delete ALL your scan results and history? This cannot be undone.')) return;
+    stopPolling();
+    stopTimer();
+    setActiveJobId(null);
     setScanResults([]); setTotalResponded(0); setTotalScanned(0);
-    setLogs([]); setItems([]); setOutputs([]); setDashboard(null);
+    setScanTotal(0); setLogs([]); setItems([]); setOutputs([]); setDashboard(null);
     toast('Local data cleared', 'info');
   };
 
@@ -1113,7 +1328,7 @@ export default function App() {
                 <div className="btn-row">
                   {!scanning
                     ? <button className="btn fill" onClick={startScan}><Play size={13} />Start</button>
-                    : <button className="btn fill stop" onClick={stopScan}><Square size={13} />Stop</button>
+                    : <button className="btn fill stop" onClick={stopScan} disabled={stopping}><Square size={13} />{stopping ? 'Stopping' : 'Stop'}</button>
                   }
                   <button className="btn outline" onClick={clearScan} disabled={scanning || scanResults.length === 0}>
                     <Trash size={13} />
@@ -1139,11 +1354,11 @@ export default function App() {
                 {(scanning || totalScanned > 0) && (
                   <div className="progress-wrap">
                     <div className="progress-meta">
-                      <span>{scanning ? 'Scanning…' : 'Done'}</span>
-                      <span>{totalScanned} / {maxIps} IPs</span>
+                      <span>{stopping ? 'Stopping...' : scanning ? 'Scanning...' : 'Done'}</span>
+                      <span>{totalScanned} / {progressTotal} IPs</span>
                     </div>
                     <div className="progress-track">
-                      <div className="progress-fill" style={{ width: `${Math.min(100, totalScanned / maxIps * 100)}%` }} />
+                      <div className="progress-fill" style={{ width: `${Math.min(100, totalScanned / progressTotal * 100)}%` }} />
                     </div>
                   </div>
                 )}
