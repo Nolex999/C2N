@@ -824,7 +824,7 @@ def api_scan(user):
     from threading import Lock
 
     selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
-    cap = min(max_ips, int(os.environ.get("SCAN_CAP", "2000")))
+    cap = max_ips
 
     include_countries = None
     if country:
@@ -926,7 +926,7 @@ def api_scan_stream(user):
     do_geo = body.get("geo", False)
 
     selected_ports = ALL_PORTS if ports == "all" else SCAN_PORTS
-    cap = min(max_ips, int(os.environ.get("SCAN_CAP", "2000")))
+    cap = max_ips
 
     include_countries = None
     if country:
