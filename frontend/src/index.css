@@ -1039,10 +1039,8 @@ tbody tr.open td { border-left: 3px solid var(--orange); }
 .dash-map {
   display: block;
   width: 100%;
-  height: auto;
   aspect-ratio: 2 / 1;
   max-height: 420px;
-  image-rendering: crisp-edges;
 }
 
 /* Bottom row */

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
+import mapboxgl from 'mapbox-gl';
 import {
   Activity, History, Mail, LogOut, User, Play, Square, Trash,
   Copy, ExternalLink, CheckCircle, XCircle, AlertCircle,
@@ -97,7 +98,9 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const mapRef = useRef<HTMLCanvasElement>(null);
+  const mapRef = useRef<HTMLDivElement>(null);
+  const mapInitRef = useRef(false);
+  const mapInstRef = useRef<mapboxgl.Map | null>(null);
 
   // Exploit / Devices
   interface ExploitDevice {
@@ -604,16 +607,6 @@ export default function App() {
 
   // ── Dashboard / Map Data ──
 
-  const CONTINENTS_DATA: Record<string, [number,number][]> = {
-    north_america: [[-130,55],[-125,50],[-120,35],[-115,30],[-105,25],[-100,20],[-90,18],[-85,12],[-80,8],[-80,25],[-77,27],[-75,30],[-70,35],[-70,42],[-65,45],[-60,48],[-55,50],[-55,55],[-60,60],[-70,65],[-80,70],[-95,70],[-110,70],[-120,70],[-140,65],[-150,65],[-160,62],[-165,60],[-130,55]],
-    south_america: [[-80,8],[-77,5],[-80,0],[-75,-5],[-80,-10],[-75,-15],[-70,-18],[-65,-25],[-60,-30],[-55,-35],[-58,-40],[-60,-50],[-65,-55],[-70,-53],[-72,-48],[-70,-40],[-60,-35],[-55,-30],[-50,-20],[-45,-15],[-43,-10],[-40,-5],[-45,0],[-50,5],[-60,5],[-70,8],[-80,8]],
-    europe: [[-10,36],[-10,38],[-5,40],[0,42],[3,43],[7,44],[10,43],[15,40],[20,38],[25,36],[28,40],[30,42],[28,45],[25,48],[20,48],[15,48],[10,55],[5,55],[0,48],[-5,48],[-8,45],[-10,43],[-10,40],[-10,36]],
-    africa: [[-15,35],[-17,30],[-15,22],[-12,15],[-15,10],[-10,5],[-5,0],[0,0],[10,2],[12,0],[15,5],[20,5],[25,2],[30,0],[35,5],[40,10],[42,12],[40,15],[35,18],[35,25],[30,30],[33,35],[30,37],[25,35],[20,37],[15,37],[10,35],[5,35],[0,35],[-5,36],[-15,35]],
-    asia: [[30,42],[35,40],[40,40],[45,40],[50,40],[55,35],[60,25],[65,22],[70,20],[75,15],[80,10],[85,10],[90,20],[95,25],[100,15],[105,10],[110,0],[115,5],[120,10],[125,15],[130,20],[135,35],[140,40],[145,45],[150,50],[145,55],[140,60],[135,65],[130,60],[120,55],[110,55],[100,55],[90,50],[80,45],[70,40],[60,40],[50,42],[45,42],[40,42],[30,42]],
-    australia: [[115,-15],[120,-15],[125,-15],[130,-12],[135,-12],[140,-15],[145,-15],[148,-20],[150,-25],[148,-30],[145,-35],[140,-38],[135,-35],[130,-33],[125,-33],[120,-30],[115,-25],[113,-22],[115,-15]],
-    greenland: [[-55,60],[-48,62],[-45,65],[-40,70],[-25,75],[-20,80],[-55,78],[-55,75],[-55,60]],
-  };
-
   const COUNTRY_CENTROIDS: Record<string, [number,number]> = {
     US:[-98,38], CA:[-106,56], MX:[-100,23], BR:[-55,-15], AR:[-63,-38], CL:[-71,-35],
     CO:[-74,4], PE:[-76,-10], GB:[-3,55], FR:[2,46], DE:[10,51], IT:[12,42],
@@ -633,9 +626,6 @@ export default function App() {
     BT:[90,27], LK:[80,7], MM:[96,22], KH:[105,13], LA:[102,18],
   };
 
-  const LON2X = (lon: number) => (lon + 180) / 360 * 800;
-  const LAT2Y = (lat: number) => (90 - lat) / 180 * 400;
-
   const fetchDashboard = async () => {
     setDashLoading(true);
     try {
@@ -644,65 +634,88 @@ export default function App() {
     } catch {} finally { setDashLoading(false); }
   };
 
-  const drawMap = useCallback(() => {
-    const canvas = mapRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const w = 800, h = 400;
-    canvas.width = w * 2; canvas.height = h * 2;
-    ctx.scale(2, 2);
+  // ── Mapbox GL JS ──
 
-    ctx.fillStyle = '#f5f5f5';
-    ctx.fillRect(0, 0, w, h);
+  useEffect(() => {
+    if (mapInitRef.current) return;
+    mapboxgl.accessToken = 'pk.eyJ1IjoibjBsZXg5OSIsImEiOiJjbXFycnJoOW8wMHZiMnBzaDV1Mzg0c2d0In0.c-ol61AlQs9LiNQ6TCBAig';
 
-    ctx.strokeStyle = '#e0e0e0';
-    ctx.lineWidth = 0.5;
-    for (let lat = -90; lat <= 90; lat += 30) {
-      ctx.beginPath(); ctx.moveTo(0, LAT2Y(lat));
-      ctx.lineTo(w, LAT2Y(lat)); ctx.stroke();
-    }
-    for (let lon = -180; lon <= 180; lon += 30) {
-      ctx.beginPath(); ctx.moveTo(LON2X(lon), 0);
-      ctx.lineTo(LON2X(lon), h); ctx.stroke();
-    }
-
-    ctx.fillStyle = '#2a2a2a';
-    Object.values(CONTINENTS_DATA).forEach(pts => {
-      ctx.beginPath();
-      pts.forEach(([lon, lat], i) => {
-        const x = LON2X(lon), y = LAT2Y(lat);
-        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-      });
-      ctx.closePath(); ctx.fill();
+    const map = new mapboxgl.Map({
+      container: mapRef.current!,
+      style: 'mapbox://styles/mapbox/dark-v11',
+      center: [0, 20],
+      zoom: 1.5,
     });
 
-    if (dashboard && dashboard.by_country.length > 0) {
-      const maxC = Math.max(...dashboard.by_country.map(c => c.count));
-      dashboard.by_country.forEach(c => {
-        let cx = 0, cy = 0;
-        const cc = COUNTRY_CENTROIDS[c.code];
-        if (cc) { cx = LON2X(cc[0]); cy = LAT2Y(cc[1]); }
-        else if (c.lat && c.lon) { cx = LON2X(c.lon); cy = LAT2Y(c.lat); }
-        else return;
-        const r = 2 + (c.count / maxC) * 12;
-        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.fillStyle = '#000'; ctx.fill();
-        ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
-        ctx.fillStyle = '#1a1a1a';
-        ctx.font = 'bold 8px Inter, sans-serif';
-        ctx.fillText(`${c.code} ${c.count}`, cx + r + 3, cy + 3);
+    map.on('load', () => {
+      map.addSource('countries', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'country-circles',
+        type: 'circle',
+        source: 'countries',
+        paint: {
+          'circle-radius': ['interpolate', ['linear'], ['get', 'count'], 1, 5, 10, 15, 100, 30, 500, 45],
+          'circle-color': '#2563eb',
+          'circle-opacity': 0.75,
+          'circle-stroke-width': 2,
+          'circle-stroke-color': '#fff',
+        },
       });
-    }
+      map.addLayer({
+        id: 'country-labels',
+        type: 'symbol',
+        source: 'countries',
+        layout: {
+          'text-field': ['concat', ['get', 'code'], '\n', ['to-string', ['get', 'count']]],
+          'text-size': 10,
+          'text-offset': [0, 1.8],
+          'text-line-height': 1.3,
+        },
+        paint: {
+          'text-color': '#fff',
+          'text-halo-color': '#000',
+          'text-halo-width': 1.2,
+        },
+      });
+      mapInitRef.current = true;
+      updateMapData(map);
+    });
 
-    ctx.fillStyle = '#aaa';
-    ctx.font = '7px Inter, sans-serif';
-    ctx.fillText('GYD · GLOBAL DEVICE MAP', 10, 12);
+    mapInstRef.current = map;
+
+    return () => {
+      map.remove();
+      mapInitRef.current = false;
+      mapInstRef.current = null;
+    };
+  }, []);
+
+  const updateMapData = useCallback((map: mapboxgl.Map) => {
+    if (!dashboard) return;
+    const features: any[] = [];
+    dashboard.by_country.forEach(c => {
+      const centroid = COUNTRY_CENTROIDS[c.code] || (c.lat != null && c.lon != null ? [c.lon, c.lat] : null);
+      if (!centroid) return;
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: [centroid[0], centroid[1]] },
+        properties: { code: c.code, count: c.count },
+      });
+    });
+    try {
+      (map.getSource('countries') as mapboxgl.GeoJSONSource)?.setData({ type: 'FeatureCollection', features });
+    } catch {}
   }, [dashboard]);
 
   useEffect(() => {
-    if (activeTab === 'dashboard') drawMap();
-  }, [activeTab, dashboard, drawMap]);
+    if (mapInstRef.current) updateMapData(mapInstRef.current);
+  }, [dashboard, updateMapData]);
+
+  useEffect(() => {
+    if (activeTab === 'dashboard' && mapInstRef.current) {
+      setTimeout(() => mapInstRef.current?.resize(), 150);
+    }
+  }, [activeTab]);
 
   const exportCSV = (results: ScanResultItem[]) => {
     const header = 'IP,Port,URL,Device,Status,Username,Password,Country,Org,Lat,Lon\n';
@@ -932,8 +945,14 @@ export default function App() {
               <p style={{ marginTop: 12, color: 'var(--gray-500)' }}>Loading dashboard data…</p>
             </div>
           )}
+
+          {/* Map — always visible */}
+          <div className="dash-map-wrap">
+            <div ref={mapRef} className="dash-map" />
+          </div>
+
           {dashboard && (
-            <div className="dash-grid">
+            <div className="dash-grid" style={{ marginTop: 0 }}>
               {/* Stats cards */}
               <div className="dash-cards">
                 <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_scans}</div><div className="dash-stat-l">Scans</div></div>
@@ -942,11 +961,6 @@ export default function App() {
                 <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.total_open}</div><div className="dash-stat-l">Open</div></div>
                 <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.countries_hit}</div><div className="dash-stat-l">Countries</div></div>
                 <div className="dash-stat"><div className="dash-stat-n">{dashboard.stats.unique_ips}</div><div className="dash-stat-l">Unique IPs</div></div>
-              </div>
-
-              {/* Map */}
-              <div className="dash-map-wrap">
-                <canvas ref={mapRef} className="dash-map" />
               </div>
 
               {/* Bottom row */}
