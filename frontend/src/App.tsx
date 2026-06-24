@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, Fragment } from 'react';
 import {
   Activity, History, Mail, LogOut, User, Play, Square, Trash,
   Copy, ExternalLink, CheckCircle, XCircle, AlertCircle,
   ChevronDown, ChevronUp, Globe, MapPin, Info, RefreshCw,
-  Download, BarChart
+  Download, BarChart, Terminal, Plug, Unplug, Server, Zap,
 } from 'lucide-react';
 
 const TOKEN_KEY = 'gyd_token';
@@ -46,7 +46,7 @@ export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem(TOKEN_KEY));
   const [user, setUser] = useState<UserInfo | null>(null);
   const [checking, setChecking] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'scan' | 'output' | 'invites'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'scan' | 'output' | 'invites' | 'devices' | 'settings'>('dashboard');
   const [inviteOnly, setInviteOnly] = useState(true);
 
   // Auth
@@ -96,7 +96,38 @@ export default function App() {
   // Dashboard
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const mapRef = useRef<HTMLCanvasElement>(null);
+
+  // Exploit / Devices
+  interface ExploitDevice {
+    id: number; ip: string; port: number; url: string; device: string;
+    username: string; password: string; country_code?: string; org?: string;
+    broken?: boolean;
+  }
+  interface ExploitSession {
+    id: string; ip: string; protocol: string; username: string;
+    created: number; item_id?: string;
+  }
+  const [exploitDevices, setExploitDevices] = useState<ExploitDevice[]>([]);
+  const [expLoading, setExpLoading] = useState(false);
+  const [sessions, setSessions] = useState<ExploitSession[]>([]);
+  const [terminalInput, setTerminalInput] = useState('');
+  const [terminalOutput, setTerminalOutput] = useState<{sessionId: string; lines: string[];}[]>([]);
+  const [connectingId, setConnectingId] = useState<number | null>(null);
+  const [autoExploit, setAutoExploit] = useState(false);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
+
+  // Scan filters & expanded rows
+  const [filterText, setFilterText] = useState('');
+  const [filterStatus, setFilterStatus] = useState('all');
+  const [expandedScanRows, setExpandedScanRows] = useState<Set<number>>(new Set());
+
+  // Presets
+  interface ScanPreset { name: string; region: string; maxIps: number; threads: number; ports: string; countryFilter: string; geoEnrich: boolean; }
+  const [presets, setPresets] = useState<ScanPreset[]>(() => {
+    try { return JSON.parse(localStorage.getItem('gyd_presets') || '[]'); } catch { return []; }
+  });
 
   // Toasts
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -449,6 +480,100 @@ export default function App() {
     window.open(`${scheme}://${item.ip}:${item.port}`, '_blank');
   };
 
+  // ── Exploit / Device exploitation ──
+  const fetchExploitDevices = async () => {
+    setExpLoading(true);
+    try {
+      const r = await apiFetch('/api/exploit/devices');
+      if (r.ok) setExploitDevices((await r.json()).devices || []);
+    } catch {} finally { setExpLoading(false); }
+  };
+
+  const fetchSessions = async () => {
+    try {
+      const r = await apiFetch('/api/exploit/sessions');
+      if (r.ok) setSessions((await r.json()).sessions || []);
+    } catch {}
+  };
+
+  const connectDevice = async (item: ExploitDevice) => {
+    setConnectingId(item.id);
+    try {
+      const r = await apiFetch('/api/exploit/connect', {
+        method: 'POST',
+        body: JSON.stringify({ item_id: item.id }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        toast(`Connected via ${d.protocol}`, 'success');
+        setTerminalOutput(p => [...p.filter(x => x.sessionId !== d.session_id), { sessionId: d.session_id, lines: [`[${d.protocol}] Connected to ${item.ip}:${item.port}\r\n`] }]);
+        fetchSessions();
+      } else {
+        const d = await r.json();
+        toast(d.error || 'Connect failed', 'error');
+      }
+    } catch (err: any) {
+      toast(err.message, 'error');
+    } finally { setConnectingId(null); }
+  };
+
+  const disconnectDevice = async (sid: string) => {
+    try {
+      const r = await apiFetch(`/api/exploit/session/${sid}/disconnect`, { method: 'POST' });
+      if (r.ok) {
+        toast('Disconnected', 'info');
+        fetchSessions();
+      }
+    } catch {}
+  };
+
+  const sendCommand = async (sid: string) => {
+    if (!terminalInput.trim()) return;
+    const cmd = terminalInput.trim();
+    setTerminalInput('');
+    setTerminalOutput(p => p.map(s => s.sessionId === sid ? { ...s, lines: [...s.lines, `$ ${cmd}\r\n`] } : s));
+    try {
+      const r = await apiFetch(`/api/exploit/session/${sid}/command`, {
+        method: 'POST',
+        body: JSON.stringify({ command: cmd }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        const out = (d.output || '') + (d.stderr ? `\r\nstderr:\r\n${d.stderr}` : '');
+        setTerminalOutput(p => p.map(s => s.sessionId === sid ? { ...s, lines: [...s.lines, `${out}\r\n`] } : s));
+      } else {
+        const d = await r.json();
+        setTerminalOutput(p => p.map(s => s.sessionId === sid ? { ...s, lines: [...s.lines, `Error: ${d.error || 'command failed'}\r\n`] } : s));
+      }
+    } catch (err: any) {
+      setTerminalOutput(p => p.map(s => s.sessionId === sid ? { ...s, lines: [...s.lines, `Error: ${err.message}\r\n`] } : s));
+    }
+  };
+
+  const runAutoExploit = async () => {
+    setAutoExploit(true);
+    toast('Auto-exploit started…', 'info');
+    try {
+      const r = await apiFetch('/api/exploit/batch', { method: 'POST' });
+      if (r.ok) {
+        const d = await r.json();
+        toast(`Auto-exploit: ${d.total} devices checked`, 'success');
+        fetchSessions();
+        fetchExploitDevices();
+        const reachable = (d.results || []).filter((x: any) => x.status === 'connected' || x.status === 'web_reachable');
+        if (reachable.length > 0) {
+          const lines = reachable.map((x: any) => `[${x.protocol || 'http'}] ${x.ip} — ${x.status} (sid: ${x.session_id || 'none'})`).join('\r\n');
+          setTerminalOutput(p => [...p, { sessionId: 'batch', lines: [`[auto-exploit] ${reachable.length} devices reachable\r\n${lines}\r\n`] }]);
+        }
+      } else {
+        const d = await r.json();
+        toast(d.error || 'Batch failed', 'error');
+      }
+    } catch (err: any) {
+      toast(err.message, 'error');
+    } finally { setAutoExploit(false); }
+  };
+
   // Invites
   const fetchInvites = async () => {
     setInvLoading(true);
@@ -591,6 +716,90 @@ export default function App() {
     a.click(); URL.revokeObjectURL(url);
   };
 
+  // Filtered results
+  const filteredResults = scanResults
+    .map((r, i) => ({ ...r, _idx: i }))
+    .filter(r => {
+      if (filterStatus === 'cred' && !r.auth_found) return false;
+      if (filterStatus === 'open' && !r.no_auth) return false;
+      if (filterStatus === 'auth' && (r.auth_found || r.no_auth)) return false;
+      if (filterText) {
+        const q = filterText.toLowerCase();
+        if (!r.ip.includes(q) && !String(r.port).includes(q) && !(r.device || '').toLowerCase().includes(q) && !(r.country_code || '').toLowerCase().includes(q))
+          return false;
+      }
+      return true;
+    });
+
+  const toggleScanRow = (idx: number) => {
+    setExpandedScanRows(p => {
+      const next = new Set(p);
+      if (next.has(idx)) next.delete(idx); else next.add(idx);
+      return next;
+    });
+  };
+
+  const savePreset = () => {
+    const name = prompt('Preset name:');
+    if (!name) return;
+    const p: ScanPreset = { name, region, maxIps, threads, ports, countryFilter, geoEnrich };
+    const updated = [...presets.filter(x => x.name !== name), p];
+    setPresets(updated);
+    localStorage.setItem('gyd_presets', JSON.stringify(updated));
+    toast(`Preset "${name}" saved`, 'success');
+  };
+
+  const loadPreset = (p: ScanPreset) => {
+    setRegion(p.region); setMaxIps(p.maxIps); setThreads(p.threads);
+    setPorts(p.ports); setCountryFilter(p.countryFilter); setGeoEnrich(p.geoEnrich);
+    toast(`Preset "${p.name}" loaded`, 'info');
+  };
+
+  const deletePreset = (name: string) => {
+    const updated = presets.filter(x => x.name !== name);
+    setPresets(updated);
+    localStorage.setItem('gyd_presets', JSON.stringify(updated));
+  };
+
+  const clearAllData = () => {
+    if (!confirm('Delete ALL your scan results and history? This cannot be undone.')) return;
+    setScanResults([]); setTotalResponded(0); setTotalScanned(0);
+    setLogs([]); setItems([]); setOutputs([]); setDashboard(null);
+    toast('Local data cleared', 'info');
+  };
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
+      switch (e.key) {
+        case '1': setActiveTab('dashboard'); break;
+        case '2': setActiveTab('scan'); break;
+        case '3': setActiveTab('output'); break;
+        case '4': setActiveTab('invites'); break;
+        case '5': setActiveTab('devices'); break;
+        case '6': setActiveTab('settings'); break;
+        case 's':
+        case 'S':
+          e.preventDefault();
+          if (scanning) stopScan(); else if (!scanning && activeTab === 'scan') startScan();
+          break;
+        case 'Escape':
+          setExpandedScanRows(new Set()); setExpanded(new Set()); break;
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [scanning, activeTab]);
+
+  // Auto-refresh dashboard
+  useEffect(() => {
+    if (!autoRefresh || activeTab !== 'dashboard') return;
+    fetchDashboard();
+    const iv = setInterval(fetchDashboard, 30000);
+    return () => clearInterval(iv);
+  }, [autoRefresh, activeTab]);
+
   // Loading
   if (checking) {
     return (
@@ -697,6 +906,14 @@ export default function App() {
           <button className={`nav-btn ${activeTab === 'invites' ? 'active' : ''}`}
             onClick={() => setActiveTab('invites')}>
             <Mail size={14} /> Invites
+          </button>
+          <button className={`nav-btn ${activeTab === 'devices' ? 'active' : ''}`}
+            onClick={() => setActiveTab('devices')}>
+            <Terminal size={14} /> Devices
+          </button>
+          <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => setActiveTab('settings')}>
+            <Activity size={14} /> Settings
           </button>
         </nav>
         <div className="header-right">
@@ -929,11 +1146,13 @@ export default function App() {
               <div className="card" style={{ padding: 0 }}>
                 <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--gray-200)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div className="card-title" style={{ marginBottom: 0 }}>Results</div>
-                  {scanResults.length > 0 && (
-                    <button className="btn outline sm" onClick={() => exportCSV(scanResults)}>
-                      <Download size={11} /> CSV
-                    </button>
-                  )}
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    {scanResults.length > 0 && (
+                      <button className="btn outline sm" onClick={() => exportCSV(scanResults)}>
+                        <Download size={11} /> CSV
+                      </button>
+                    )}
+                  </div>
                 </div>
                 {scanResults.length === 0 ? (
                   <div className="empty">
@@ -942,38 +1161,88 @@ export default function App() {
                     <p>Configure and start a scan to see discovered devices here.</p>
                   </div>
                 ) : (
-                  <div className="table-wrap">
-                    <div className="table-scroll">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>IP</th><th>Port</th><th>URL</th><th>Device</th>
-                            <th>Status</th><th>Credentials</th><th>Country</th><th>Org</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {scanResults.slice().reverse().map((r, i) => (
-                            <tr key={i} className={r.auth_found ? 'cred' : r.no_auth ? 'open' : ''}>
-                              <td style={{ fontFamily: 'var(--font-mono)' }}>{r.ip}</td>
-                              <td style={{ fontFamily: 'var(--font-mono)' }}>{r.port}</td>
-                              <td style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'var(--font-mono)' }} title={r.url}>{r.url}</td>
-                              <td>{r.device || '?'}</td>
-                              <td>
-                                {r.auth_found ? <span className="badge cred">CRED</span>
-                                  : r.no_auth ? <span className="badge open">OPEN</span>
-                                  : <span className="badge auth">AUTH</span>}
-                              </td>
-                              <td>
-                                {r.auth_found ? <span className="cred-val">{r.username}:{r.password}</span> : '—'}
-                              </td>
-                              <td>{r.country_code || '—'}</td>
-                              <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.org || '—'}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                  <>
+                    {/* Filter bar */}
+                    <div className="filter-bar">
+                      <input className="field-input" type="text" placeholder="Search IP, port, device, country…"
+                        value={filterText} onChange={e => setFilterText(e.target.value)} style={{ flex: 1 }} />
+                      <select className="field-input" value={filterStatus} onChange={e => setFilterStatus(e.target.value)}
+                        style={{ width: 120 }}>
+                        <option value="all">All ({filteredResults.length})</option>
+                        <option value="cred">Credentials</option>
+                        <option value="open">Open</option>
+                        <option value="auth">Protected</option>
+                      </select>
                     </div>
-                  </div>
+                    <div className="table-wrap">
+                      <div className="table-scroll">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th style={{ width: 20 }}></th>
+                              <th>IP</th><th>Port</th><th>URL</th><th>Device</th>
+                              <th>Status</th><th>Credentials</th><th>Country</th><th>Org</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredResults.length === 0 ? (
+                              <tr><td colSpan={9} style={{ textAlign: 'center', padding: 24, color: 'var(--gray-400)' }}>No matching results</td></tr>
+                            ) : (
+                              filteredResults.slice().reverse().map(r => {
+                                const isExpanded = expandedScanRows.has(r._idx);
+                                return (
+                                  <Fragment key={r._idx}>
+                                    <tr className={`${r.auth_found ? 'cred' : r.no_auth ? 'open' : ''} ${isExpanded ? 'expanded' : ''}`}
+                                      onClick={() => toggleScanRow(r._idx)} style={{ cursor: 'pointer' }}>
+                                      <td>{isExpanded ? <ChevronUp size={11} /> : <ChevronDown size={11} />}</td>
+                                      <td style={{ fontFamily: 'var(--font-mono)' }}>{r.ip}</td>
+                                      <td style={{ fontFamily: 'var(--font-mono)' }}>{r.port}</td>
+                                      <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', fontFamily: 'var(--font-mono)' }} title={r.url}>{r.url}</td>
+                                      <td>{r.device || '?'}</td>
+                                      <td>
+                                        {r.auth_found ? <span className="badge cred">CRED</span>
+                                          : r.no_auth ? <span className="badge open">OPEN</span>
+                                          : <span className="badge auth">AUTH</span>}
+                                      </td>
+                                      <td>
+                                        {r.auth_found ? <span className="cred-val">{r.username}:{r.password}</span> : '—'}
+                                      </td>
+                                      <td>{r.country_code || '—'}</td>
+                                      <td style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.org || '—'}</td>
+                                    </tr>
+                                    {isExpanded && (
+                                      <tr className="scan-detail-row">
+                                        <td colSpan={9}>
+                                          <div className="scan-detail-body">
+                                            <div className="scan-detail-grid">
+                                              <div><span className="scan-detail-lbl">URL</span><span className="scan-detail-val">{r.url}</span></div>
+                                              <div><span className="scan-detail-lbl">Device</span><span className="scan-detail-val">{r.device || 'Unknown'}</span></div>
+                                              <div><span className="scan-detail-lbl">Status</span><span className="scan-detail-val">{r.auth_found ? 'Credentials Found' : r.no_auth ? 'No Auth Required' : 'Protected'}</span></div>
+                                              <div><span className="scan-detail-lbl">Creds</span><span className="scan-detail-val">{r.auth_found ? `${r.username}:${r.password}` : '—'}</span></div>
+                                              <div><span className="scan-detail-lbl">Country</span><span className="scan-detail-val">{r.country_code || '—'} {r.country || ''}</span></div>
+                                              {r.org && <div><span className="scan-detail-lbl">Org</span><span className="scan-detail-val">{r.org}</span></div>}
+                                              {r.isp && <div><span className="scan-detail-lbl">ISP</span><span className="scan-detail-val">{r.isp}</span></div>}
+                                              {r.as_info && <div><span className="scan-detail-lbl">AS</span><span className="scan-detail-val">{r.as_info}</span></div>}
+                                              <div><span className="scan-detail-lbl">HTTP</span><span className="scan-detail-val">{r.status_code}</span></div>
+                                            </div>
+                                            <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                                              <button className="btn outline sm" onClick={(e) => { e.stopPropagation(); openDevice(r); }}>
+                                                <ExternalLink size={10} /> Open
+                                              </button>
+                                            </div>
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -1227,6 +1496,200 @@ export default function App() {
                 </table>
               </div>
             )}
+          </div>
+        </div>
+
+        {/* ── Devices ── */}
+        <div className={`tab-panel ${activeTab === 'devices' ? 'active' : ''}`}>
+          <div className="devices-header">
+            <div>
+              <div className="devices-title"><Server size={16} /> Exploitable Devices</div>
+              <div className="devices-sub">Hardware devices with working credentials. Try SSH or HTTP shell access.</div>
+            </div>
+            <div className="devices-header-actions">
+              <button className="btn outline sm" onClick={fetchSessions}>
+                <RefreshCw size={11} /> Sessions ({sessions.length})
+              </button>
+              <button className="btn outline sm" onClick={runAutoExploit} disabled={autoExploit}>
+                {autoExploit ? <RefreshCw size={11} className="spin" /> : <Zap size={11} />} Auto-Exploit
+              </button>
+              <button className="btn outline sm" onClick={fetchExploitDevices}>
+                <RefreshCw size={11} /> Refresh
+              </button>
+            </div>
+          </div>
+
+          {/* Terminal output area */}
+          <div className="exploit-terminals">
+            {sessions.length === 0 && terminalOutput.length === 0 && (
+              <div className="empty" style={{ padding: '24px 0' }}>
+                <Terminal size={32} />
+                <h3>No active sessions</h3>
+                <p>Connect to a device below, or run Auto-Exploit to scan all devices at once.</p>
+              </div>
+            )}
+            {terminalOutput.map(t => (
+              <div key={t.sessionId} className="terminal-box">
+                <div className="terminal-header">
+                  <Terminal size={10} /> Session {t.sessionId === 'batch' ? '(batch)' : t.sessionId.slice(0, 8)}…
+                  <button className="btn outline sm" style={{ marginLeft: 'auto' }}
+                    onClick={() => { navigator.clipboard.writeText(t.lines.join('')); toast('Copied', 'success'); }}>
+                    <Copy size={9} />
+                  </button>
+                  {t.sessionId !== 'batch' && (
+                    <button className="btn outline sm" onClick={() => disconnectDevice(t.sessionId)}
+                      style={{ color: 'var(--red)', borderColor: 'var(--red)', marginLeft: 4 }}>
+                      <Unplug size={9} /> Close
+                    </button>
+                  )}
+                </div>
+                <div className="terminal-body">
+                  {t.lines.map((line, li) => (
+                    <div key={li} className="terminal-line" style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{line}</div>
+                  ))}
+                  <div ref={terminalEndRef} />
+                </div>
+                {t.sessionId !== 'batch' && (
+                  <div className="terminal-input-row">
+                    <input className="terminal-input" type="text" value={terminalInput}
+                      onChange={e => setTerminalInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === 'Enter') sendCommand(t.sessionId); }}
+                      placeholder="Enter command…" autoFocus />
+                    <button className="btn fill sm" onClick={() => sendCommand(t.sessionId)}>
+                      <Play size={10} /> Send
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Device list */}
+          <div className="card" style={{ padding: 0 }}>
+            <div className="device-list-header">
+              <span>Discovered Hardware Devices ({exploitDevices.length})</span>
+            </div>
+            {expLoading ? (
+              <div style={{ textAlign: 'center', padding: 32 }}>
+                <RefreshCw size={20} className="spin" color="var(--gray-400)" />
+              </div>
+            ) : exploitDevices.length === 0 ? (
+              <div className="empty">
+                <Server size={28} />
+                <h3>No hardware devices found</h3>
+                <p>Run a scan first. Hardware devices (routers, cameras, switches) with working credentials will appear here.</p>
+              </div>
+            ) : (
+              <div className="exploit-device-list">
+                {exploitDevices.map(d => {
+                  const activeSession = sessions.find(s => s.item_id === String(d.id));
+                  return (
+                    <div key={d.id} className={`exploit-device-item ${activeSession ? 'connected' : ''}`}>
+                      <div className="exploit-device-info">
+                        <div className="exploit-device-name">
+                          <Server size={12} style={{ marginRight: 6, flexShrink: 0 }} />
+                          <strong>{d.device}</strong>
+                          <span className="exploit-device-ip">{d.ip}:{d.port}</span>
+                        </div>
+                        <div className="exploit-device-meta">
+                          <span className="exploit-country">{d.country_code || '?'}</span>
+                          <span className="exploit-creds">{d.username}:{d.password}</span>
+                          {d.org && <span className="exploit-org">{d.org}</span>}
+                        </div>
+                      </div>
+                      <div className="exploit-device-actions">
+                        {activeSession ? (
+                          <>
+                            <span className="badge-status active">CONNECTED</span>
+                            <button className="btn outline sm" onClick={() => disconnectDevice(activeSession.id)}
+                              style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>
+                              <Unplug size={10} /> Disconnect
+                            </button>
+                          </>
+                        ) : (
+                          <button className="btn fill sm" onClick={() => connectDevice(d)}
+                            disabled={connectingId === d.id}>
+                            {connectingId === d.id ? <RefreshCw size={10} className="spin" /> : <Plug size={10} />} Connect
+                          </button>
+                        )}
+                        <button className="btn outline sm" onClick={() => openDevice({...d, no_auth: false, auth_found: true, id: d.id, device: d.device, url: d.url || ''})}>
+                          <ExternalLink size={10} /> Open
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* ── Settings ── */}
+        <div className={`tab-panel ${activeTab === 'settings' ? 'active' : ''}`}>
+          <div className="settings-grid">
+            {/* Scan Presets */}
+            <div className="settings-card">
+              <div className="settings-card-title">Scan Presets</div>
+              <div className="settings-card-body">
+                <p className="settings-desc">Save and load scan configurations.</p>
+                <div className="preset-list">
+                  {presets.length === 0 && <span className="settings-empty">No presets saved yet.</span>}
+                  {presets.map(p => (
+                    <div key={p.name} className="preset-item">
+                      <div className="preset-info">
+                        <strong>{p.name}</strong>
+                        <span>{p.region} · {p.maxIps} IPs · {p.threads}t · {p.ports}</span>
+                      </div>
+                      <div className="preset-actions">
+                        <button className="btn outline sm" onClick={() => loadPreset(p)}>Load</button>
+                        <button className="btn outline sm" onClick={() => deletePreset(p.name)} style={{ color: 'var(--red)', borderColor: 'var(--red)' }}>Del</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <button className="btn outline" style={{ marginTop: 12, width: '100%' }} onClick={savePreset}>
+                  <Download size={12} /> Save Current Config
+                </button>
+              </div>
+            </div>
+
+            {/* Shortcuts */}
+            <div className="settings-card">
+              <div className="settings-card-title">Keyboard Shortcuts</div>
+              <div className="settings-card-body">
+                <div className="shortcut-row"><kbd>1</kbd><span>Dashboard</span></div>
+                <div className="shortcut-row"><kbd>2</kbd><span>Scan</span></div>
+                <div className="shortcut-row"><kbd>3</kbd><span>Results</span></div>
+                <div className="shortcut-row"><kbd>4</kbd><span>Invites</span></div>
+                <div className="shortcut-row"><kbd>5</kbd><span>Devices</span></div>
+                <div className="shortcut-row"><kbd>6</kbd><span>Settings</span></div>
+                <div className="shortcut-row"><kbd>S</kbd><span>Start / Stop scan</span></div>
+                <div className="shortcut-row"><kbd>Esc</kbd><span>Collapse all rows</span></div>
+              </div>
+            </div>
+
+            {/* Dashboard Settings */}
+            <div className="settings-card">
+              <div className="settings-card-title">Dashboard</div>
+              <div className="settings-card-body">
+                <label className="checkbox-row" style={{ marginBottom: 0 }}>
+                  <input type="checkbox" checked={autoRefresh}
+                    onChange={e => setAutoRefresh(e.target.checked)} />
+                  Auto-refresh every 30s
+                </label>
+              </div>
+            </div>
+
+            {/* Data */}
+            <div className="settings-card">
+              <div className="settings-card-title">Data</div>
+              <div className="settings-card-body">
+                <p className="settings-desc">Clear locally cached data (does not affect server).</p>
+                <button className="btn outline" style={{ width: '100%', color: 'var(--red)', borderColor: 'var(--red)' }} onClick={clearAllData}>
+                  <Trash size={12} /> Clear Local Data
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 

@@ -710,6 +710,77 @@ def identify_device(r):
     return "Unknown HTTP Service"
 
 
+# ─────────────── Device Classification ───────────────
+
+HARDWARE_DEVICE_NAMES = [
+    "router", "switch", "access point", "modem", "gateway",
+    "firewall", "vpn", "bridge", "repeater", "extender",
+    "camera", "dvr", "nvr", "webcam", "cctv", "ipcam",
+    "printer", "mfp", "scanner",
+    "nas", "storage", "ups", "pdu", "plc", "rtu", "scada",
+    "phone", "pbx", "voip", "ata", "sensor", "controller", "thermostat",
+    "hikvision", "dahua", "axis", "bosch", "reolink", "amcrest", "foscam",
+    "grandstream", "yealink", "polycom",
+    "fortinet", "fortigate", "sonicwall", "watchguard", "palo alto",
+    "juniper", "brocade", "extreme", "ruckus", "aruba", "meraki",
+    "moxa", "advantech", "sierra", "cradlepoint", "peplink", "teltonika",
+    "digi", "multitech", "wago", "siemens", "schneider",
+    "epson", "brother", "canon", "lexmark", "ricoh", "xerox", "kyocera",
+    "tp-link", "d-link", "dlink", "netgear", "linksys", "cisco",
+    "mikrotik", "ubiquiti", "unifi",
+    "openwrt", "dd-wrt", "tomato", "pfsense", "opnsense",
+    "dell", "lenovo", "supermicro",
+    "apc", "cyberpower",
+    "avm", "fritz", "technicolor", "zyxel", "buffalo",
+    "synology", "qnap", "truenas", "freenas", "unraid",
+    "vmware", "esxi", "vsphere", "xenserver", "hyper-v",
+    "huawei", "zte", "xiaomi", "tenda",
+    "shelly", "sonoff", "tasmota",
+    "raspberry", "arduino", "esp32", "esp8266",
+    "motioneye", "zoneminder", "blue iris",
+    "foscam", "wanscam", "tenvis", "avtech",
+]
+
+WEB_APP_NAMES = [
+    "wordpress", "joomla", "drupal", "magento", "shopify",
+    "jenkins", "grafana", "prometheus", "kibana", "elasticsearch",
+    "jira", "confluence", "gitlab", "gitea", "bitbucket",
+    "phpmyadmin", "phpadmin", "adminer",
+    "cpanel", "whm", "plesk", "webmin",
+    "laravel", "symfony", "django", "rails", "spring",
+    "nginx", "apache", "iis", "tomcat", "caddy", "traefik", "haproxy", "squid",
+    "roundcube", "squirrelmail", "rainloop", "webmail",
+    "pi-hole", "adguard", "unbound",
+    "emby", "jellyfin", "plex",
+    "transmission", "deluge", "qbittorrent",
+    "nextcloud", "owncloud", "seafile",
+    "hass", "home assistant", "openhab",
+    "nodered", "node-red", "n8n",
+    "jupyter", "portainer",
+    "kubernetes", "docker", "redis", "mongodb",
+    "rabbitmq", "consul", "nomad", "vault",
+    "sonarqube", "artifactory", "nexus", "minio",
+    "frigate", "mjpg-streamer", "webcamxp", "yawcam",
+    "contacam", "ispy", "xeoma", "sighthound", "securityspy",
+]
+
+
+def classify_device_type(device_name):
+    """Classify a found service as hardware device, web app, or unknown."""
+    name_lower = (device_name or "").lower()
+    for kw in HARDWARE_DEVICE_NAMES:
+        if kw in name_lower:
+            return "device"
+    for kw in WEB_APP_NAMES:
+        if kw in name_lower:
+            return "webapp"
+    return "unknown"
+
+
+def is_hardware_device(device_name):
+    return classify_device_type(device_name) == "device"
+
+
 def check_no_auth(r):
     body_lower = r.text.lower()[:10000] if r.text else ""
     www_auth = r.headers.get("WWW-Authenticate", "")
@@ -774,6 +845,15 @@ def get_relevant_creds(device_type, max_creds=10):
         for entry in WEBCAM_CREDS:
             key = (entry[0], entry[1], entry[2])
             scored[key] = scored.get(key, 0) + 3
+    # Add SecLists creds with lower priority
+    try:
+        from seclist_loader import load_all_creds, get_creds_for_device
+        sl_creds = get_creds_for_device(device_type, max_creds=30) if device_type else load_all_creds()[:30]
+        for entry in sl_creds:
+            key = (entry[0], entry[1], entry[2])
+            scored[key] = scored.get(key, 0) + 1
+    except Exception:
+        pass
     for entry in FALLBACK_CREDS:
         scored.setdefault(entry, 1)
     ranked = sorted(scored.items(), key=lambda x: -x[1])
