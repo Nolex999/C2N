@@ -637,7 +637,7 @@ export default function App() {
   // ── Mapbox GL JS ──
 
   useEffect(() => {
-    if (mapInitRef.current) return;
+    if (mapInitRef.current || checking || !token || !mapRef.current) return;
     mapboxgl.accessToken = 'pk.eyJ1IjoibjBsZXg5OSIsImEiOiJjbXFycnJoOW8wMHZiMnBzaDV1Mzg0c2d0In0.c-ol61AlQs9LiNQ6TCBAig';
 
     const map = new mapboxgl.Map({
@@ -684,11 +684,13 @@ export default function App() {
     mapInstRef.current = map;
 
     return () => {
-      map.remove();
-      mapInitRef.current = false;
-      mapInstRef.current = null;
+      if (mapInstRef.current) {
+        mapInstRef.current.remove();
+        mapInitRef.current = false;
+        mapInstRef.current = null;
+      }
     };
-  }, []);
+  }, [checking, token]);
 
   const updateMapData = useCallback((map: mapboxgl.Map) => {
     if (!dashboard) return;
