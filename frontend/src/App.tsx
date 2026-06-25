@@ -4,7 +4,7 @@ import {
   Activity, History, Mail, LogOut, User, Play, Square, Trash,
   Copy, ExternalLink, CheckCircle, XCircle, AlertCircle,
   ChevronDown, ChevronUp, Globe, MapPin, Info, RefreshCw,
-  Download, BarChart, Terminal, Plug, Unplug, Server, Zap, Search,
+  Download, BarChart, Terminal, Plug, Unplug, Server, Zap, Search, Database,
 } from 'lucide-react';
 
 const TOKEN_KEY = 'gyd_token';
@@ -95,6 +95,7 @@ interface LogLine { timestamp: string; message: string; type: 'info' | 'hit' | '
 interface DeviceState {
   loading: boolean; status: string; output: string;
   user: string; pass: string; showShell: boolean; command: string;
+  dbResults?: any; dbLoading?: boolean;
 }
 
 interface DashboardCountry { code: string; count: number; creds: number; open: number; lat?: number; lon?: number; }
@@ -660,7 +661,7 @@ export default function App() {
   const bruteDevice = async (id: number) => {
     const s = deviceStates[id];
     if (!s) return;
-    updDevice(id, { loading: true, output: 'Brute forcing…' });
+    updDevice(id, { loading: true, output: 'Brute forcing…', dbResults: undefined });
     try {
       const r = await apiFetch(`/api/devices/${id}/brute`, {
         method: 'POST', body: JSON.stringify({ max_tries: 50 })
@@ -680,6 +681,17 @@ export default function App() {
     } catch (err: any) {
       updDevice(id, { loading: false, status: '✗ Error', output: `Brute error: ${err.message}` });
     }
+  };
+
+  const extractDb = async (id: number) => {
+    const s = deviceStates[id];
+    if (!s) return;
+    updDevice(id, { dbLoading: true, dbResults: undefined });
+    try {
+      const r = await apiFetch(`/api/devices/${id}/db-extract`, { method: 'POST', body: '{}' });
+      const d = await r.json();
+      updDevice(id, { dbLoading: false, dbResults: d });
+    } catch { updDevice(id, { dbLoading: false, dbResults: { error: 'Request failed' } }); }
   };
 
   const execShell = async (id: number) => {
@@ -1681,6 +1693,9 @@ export default function App() {
                                     <button className="interact-btn outline-btn" onClick={() => bruteDevice(item.id)} disabled={ds.loading} title="Try 50 credential combinations">
                                       <RefreshCw size={11} /> Brute
                                     </button>
+                                    <button className="interact-btn outline-btn db-btn" onClick={() => extractDb(item.id)} disabled={ds.dbLoading} title="Check for SQLi, phpMyAdmin, config leaks">
+                                      <Database size={11} /> DB
+                                    </button>
                                     <button className="interact-btn outline-btn" onClick={() => openDevice(item)}>
                                       <ExternalLink size={12} />
                                     </button>
@@ -1698,6 +1713,32 @@ export default function App() {
                                         Copy
                                       </button>
                                       {ds.output}
+                                    </div>
+                                  )}
+                                  {ds.dbLoading && <div className="interact-output" style={{ fontStyle: 'italic', opacity: 0.6 }}>Scanning for DB leaks…</div>}
+                                  {ds.dbResults && !ds.dbLoading && (
+                                    <div className="interact-output db-results">
+                                      <div className="db-results-title"><Database size={12} /> DB Extraction Results</div>
+                                      {ds.dbResults.error ? (
+                                        <div className="db-error">{ds.dbResults.error}</div>
+                                      ) : (
+                                        <>
+                                          <div className="db-summary">{ds.dbResults.total} finding(s) on {ds.dbResults.device}</div>
+                                          {ds.dbResults.findings?.map((f: any, i: number) => (
+                                            <div key={i} className="db-finding">
+                                              <span className={`db-badge ${f.type}`}>{f.type.replace('_', ' ')}</span>
+                                              {f.url && <span className="db-url">{f.url}</span>}
+                                              {f.detail && <span className="db-detail">{f.detail}</span>}
+                                              {f.findings?.map((fi: any, j: number) => (
+                                                <div key={j} className="db-sub">
+                                                  <code>{fi.payload}</code> → {fi.errors?.join(', ') || `diff=${fi.diff_ratio || '?'}`}
+                                                  {fi.is_vulnerable && <span className="db-vuln">VULNERABLE</span>}
+                                                </div>
+                                              ))}
+                                            </div>
+                                          ))}
+                                        </>
+                                      )}
                                     </div>
                                   )}
                                 </div>

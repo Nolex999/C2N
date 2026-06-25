@@ -892,7 +892,7 @@ LOGIN_FORM_RE = re.compile(
     re.I | re.S
 )
 INPUT_RE = re.compile(
-    r'<input\s[^>]*?(?:name=["\'](.*?)["\'])[^>]*?(?:type=["\'](.*?)["\'])?', re.I
+    r'<input\s[^>]*?(?:name=["\'](.*?)["\'])[^>]*?(?:value=["\'](.*?)["\'])?[^>]*?(?:type=["\'](.*?)["\'])?', re.I
 )
 INPUT_RE_NAME_FIRST = re.compile(
     r'<input\s[^>]*?(?:name=["\'](.*?)["\'])[^>]*?>', re.I
@@ -911,9 +911,13 @@ def extract_login_form(body):
         inputs = []
         for m in INPUT_RE.finditer(inner):
             name = m.group(1)
-            itype = (m.group(2) or 'text').lower()
-            if name and itype not in ('submit', 'button', 'hidden', 'image', 'reset'):
-                inputs.append({'name': name, 'type': itype})
+            itype = (m.group(3) or 'text').lower()
+            if not name:
+                continue
+            if itype in ('submit', 'button', 'image', 'reset'):
+                continue
+            val = (m.group(2) or '') if itype == 'hidden' else ''
+            inputs.append({'name': name, 'type': itype, 'value': val})
         method_m = FORM_METHOD_RE.search(inner)
         method = (method_m.group(1) if method_m else 'post').upper()
         return {
@@ -924,10 +928,10 @@ def extract_login_form(body):
     return None
 
 
-def try_form_auth(ip, port, scheme, user, pw, login_form, base_url):
+def try_form_auth(ip, port, scheme, user, pw, login_form, base_url, session=None):
     action = login_form['action']
     method = login_form['method']
-    inputs = login_form['inputs']
+    inputs = login_form.get('inputs', [])
     action_url = action if action.startswith('http') else (
         action if action.startswith('/') else f"{base_url}/{action}"
     )
@@ -937,17 +941,22 @@ def try_form_auth(ip, port, scheme, user, pw, login_form, base_url):
         action_url = f"{base_url}/{action}"
     data = {}
     for inp in inputs:
-        if inp['type'] == 'password':
-            data[inp['name']] = pw
-        elif inp['type'] in ('text', 'email', 'tel', ''):
-            data[inp['name']] = user
+        inp_type = inp.get('type', 'text').lower()
+        inp_name = inp.get('name', '')
+        if not inp_name:
+            continue
+        if inp_type == 'password':
+            data[inp_name] = pw
+        elif inp_type == 'hidden':
+            data[inp_name] = inp.get('value', '')
         else:
-            data[inp['name']] = ''
+            data[inp_name] = user
+    http = session or requests
     try:
         if method == 'GET':
-            r = requests.get(action_url, params=data, timeout=5, allow_redirects=True, verify=False)
+            r = http.get(action_url, params=data, timeout=5, allow_redirects=True, verify=False)
         else:
-            r = requests.post(action_url, data=data, timeout=5, allow_redirects=True, verify=False)
+            r = http.post(action_url, data=data, timeout=5, allow_redirects=True, verify=False)
         return r
     except:
         return None
