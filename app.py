@@ -629,8 +629,7 @@ def api_brute_device(user, item_id):
         get_relevant_creds, extract_title, extract_form_fields,
         response_has_session_cookie, has_dashboard_content, has_login_form,
         count_failure_phrases, body_has_password_input, has_error_banner,
-        body_has_success_phrases, _auth_attempt_counts, _auth_attempt_lock,
-        MAX_AUTH_PER_IP
+        body_has_success_phrases, extract_login_form, try_form_auth,
     )
     from difflib import SequenceMatcher
     try:
@@ -650,15 +649,18 @@ def api_brute_device(user, item_id):
     custom_creds = body_data.get("creds", [])
     max_tries = int(body_data.get("max_tries", 50))
 
-    # Get unauth baseline
+    # Get unauth baseline + login form
     unauth_body = ""
     unauth_title = ""
     unauth_forms = None
+    login_form = None
+    base_url = f"{scheme}://{ip}:{port}"
     try:
-        u = http_req.get(f"{scheme}://{ip}:{port}", timeout=5, allow_redirects=False, verify=False)
+        u = http_req.get(base_url, timeout=5, allow_redirects=False, verify=False)
         unauth_body = u.text or ""
         unauth_title = extract_title(unauth_body)
         unauth_forms = extract_form_fields(unauth_body)
+        login_form = extract_login_form(unauth_body)
     except:
         pass
 
@@ -667,48 +669,70 @@ def api_brute_device(user, item_id):
     else:
         creds_to_try = [(u, p, n) for u, p, n in get_relevant_creds(device, max_creds=max_tries)]
 
+    def check_auth_success(user, pw, note, r):
+        if r is None:
+            return None
+        if r.status_code == 401:
+            return None
+        if r.status_code in (302, 301):
+            dest = r.headers.get("Location", "").lower()
+            if not any(x in dest for x in ("login", "auth", "signin", "logon")):
+                return {"username": user, "password": pw, "note": note, "status": r.status_code, "score": 100}
+            return None
+        if r.status_code == 200:
+            body = r.text or ""
+            body_lower = body.lower()[:5000]
+            score = 0
+            if response_has_session_cookie(r): score += 40
+            if has_dashboard_content(body_lower): score += 25
+            cur_title = extract_title(body)
+            if cur_title and unauth_title:
+                t1, t2 = cur_title.lower(), unauth_title.lower()
+                if t1 != t2 and not any(x in t1 for x in ("login", "sign in", "signin", "authenticate", "password")):
+                    score += 20
+            auth_forms = extract_form_fields(body)
+            if unauth_forms and auth_forms:
+                if unauth_forms["password_count"] > 0 and auth_forms["password_count"] == 0:
+                    score += 30
+            score += body_has_success_phrases(body) * 6
+            if body_has_password_input(body): score -= 40
+            if unauth_body and len(body) > 200 and len(unauth_body) > 200:
+                ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
+                if ratio > 0.93: score -= 50
+                elif ratio > 0.80: score -= 20
+            if has_login_form(body_lower): score -= 30
+            score -= count_failure_phrases(body) * 8
+            if has_error_banner(body_lower): score -= 20
+            if score >= 25:
+                return {"username": user, "password": pw, "note": note, "status": r.status_code, "score": score}
+        return None
+
     working = []
+
+    # Phase 1: HTTP Basic Auth
     for user, pw, note in creds_to_try:
         if len(working) >= 5:
             break
         try:
-            r = http_req.get(f"{scheme}://{ip}:{port}", auth=(user, pw),
-                             timeout=5, allow_redirects=False, verify=False)
-            if r.status_code == 401:
-                continue
-            if r.status_code in (302, 301):
-                dest = r.headers.get("Location", "").lower()
-                if not any(x in dest for x in ("login", "auth", "signin")):
-                    working.append({"username": user, "password": pw, "note": note, "status": r.status_code, "score": 100})
-                continue
-            if r.status_code == 200:
-                body = r.text or ""
-                body_lower = body.lower()[:5000]
-                score = 0
-                if response_has_session_cookie(r): score += 40
-                if has_dashboard_content(body_lower): score += 25
-                cur_title = extract_title(body)
-                if cur_title and unauth_title:
-                    t1, t2 = cur_title.lower(), unauth_title.lower()
-                    if t1 != t2 and not any(x in t1 for x in ("login", "sign in", "signin", "authenticate", "password")):
-                        score += 20
-                auth_forms = extract_form_fields(body)
-                if unauth_forms and auth_forms:
-                    if unauth_forms["password_count"] > 0 and auth_forms["password_count"] == 0:
-                        score += 30
-                score += body_has_success_phrases(body) * 6
-                if body_has_password_input(body): score -= 40
-                if unauth_body and len(body) > 200 and len(unauth_body) > 200:
-                    ratio = SequenceMatcher(None, body[:3000], unauth_body[:3000]).ratio()
-                    if ratio > 0.93: score -= 50
-                    elif ratio > 0.80: score -= 20
-                if has_login_form(body_lower): score -= 30
-                score -= count_failure_phrases(body) * 8
-                if has_error_banner(body_lower): score -= 20
-                if score >= 25:
-                    working.append({"username": user, "password": pw, "note": note, "status": r.status_code, "score": score})
+            r = http_req.get(base_url, auth=(user, pw), timeout=5, allow_redirects=False, verify=False)
+            result = check_auth_success(user, pw, note, r)
+            if result:
+                working.append(result)
         except:
             pass
+
+    # Phase 2: Form-based login (if login form detected)
+    if login_form and len(working) == 0:
+        for user, pw, note in creds_to_try:
+            if len(working) >= 5:
+                break
+            try:
+                r = try_form_auth(ip, port, scheme, user, pw, login_form, base_url)
+                result = check_auth_success(user, pw, note, r)
+                if result:
+                    working.append(result)
+            except:
+                pass
 
     return jsonify({"status": "ok", "total_tried": len(creds_to_try), "working": working})
 
@@ -1431,6 +1455,76 @@ def api_dashboard_stats(user):
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ─────────────── OSINT Tools ───────────────
+
+@app.route("/api/osint/ip", methods=["POST"])
+@require_auth
+def api_osint_ip(user):
+    import socket, struct
+    body = request.get_json(force=True) or {}
+    target = body.get("target", "").strip()
+    if not target:
+        return jsonify({"error": "target required"}), 400
+    result = {"target": target, "dns": {}, "geo": None, "reverse_dns": None}
+    try:
+        addr = socket.gethostbyname(target)
+        result["dns"]["a_record"] = addr
+        try:
+            host = socket.gethostbyaddr(addr)
+            result["reverse_dns"] = host[0]
+        except:
+            pass
+    except Exception as e:
+        return jsonify({"error": f"DNS resolution failed: {e}"}), 400
+    try:
+        r = requests.get(f"http://ip-api.com/json/{addr}?fields=66846719", timeout=5)
+        if r.ok:
+            result["geo"] = r.json()
+    except:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/osint/dns", methods=["POST"])
+@require_auth
+def api_osint_dns(user):
+    import socket
+    body = request.get_json(force=True) or {}
+    domain = body.get("domain", "").strip()
+    if not domain:
+        return jsonify({"error": "domain required"}), 400
+    result = {"domain": domain, "records": {}}
+    try:
+        result["records"]["a"] = socket.gethostbyname(domain)
+    except:
+        result["records"]["a"] = None
+    try:
+        result["records"]["mx"] = []
+        _, _, addrlist = socket.gethostbyname_ex(domain)
+        result["records"]["mx"] = addrlist[:5]
+    except:
+        pass
+    return jsonify(result)
+
+
+@app.route("/api/osint/email", methods=["POST"])
+@require_auth
+def api_osint_email(user):
+    body = request.get_json(force=True) or {}
+    domain = body.get("domain", "").strip().lower()
+    if not domain or "." not in domain:
+        return jsonify({"error": "valid domain required"}), 400
+    patterns = [
+        "admin@{d}", "info@{d}", "contact@{d}", "support@{d}",
+        "sales@{d}", "webmaster@{d}", "postmaster@{d}",
+        "hostmaster@{d}", "abuse@{d}", "noreply@{d}",
+        "hello@{d}", "help@{d}", "service@{d}",
+    ]
+    name = domain.split("@")[-1] if "@" in domain else domain
+    common = [p.format(d=name) for p in patterns]
+    return jsonify({"domain": name, "emails": common, "count": len(common)})
+
 
 @app.route("/api/health")
 def api_health():

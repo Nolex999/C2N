@@ -1499,3 +1499,41 @@ tbody tr.open td { border-left: 3px solid var(--orange); }
   flex-shrink: 0;
   align-items: center;
 }
+
+/* ── OSINT ── */
+.osint-input-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.osint-input-row .input {
+  flex: 1;
+}
+.osint-result {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--gray-900);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.osint-label {
+  color: var(--gray-400);
+  font-weight: 500;
+  display: inline-block;
+  min-width: 60px;
+}
+.osint-email-line {
+  font-family: var(--font-mono);
+  padding: 2px 0;
+  color: var(--cyan);
+}
+.osint-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 68, 68, 0.08);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  color: var(--red);
+  font-size: 13px;
+}

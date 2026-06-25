@@ -4,7 +4,7 @@ import {
   Activity, History, Mail, LogOut, User, Play, Square, Trash,
   Copy, ExternalLink, CheckCircle, XCircle, AlertCircle,
   ChevronDown, ChevronUp, Globe, MapPin, Info, RefreshCw,
-  Download, BarChart, Terminal, Plug, Unplug, Server, Zap,
+  Download, BarChart, Terminal, Plug, Unplug, Server, Zap, Search,
 } from 'lucide-react';
 
 const TOKEN_KEY = 'gyd_token';
@@ -12,8 +12,8 @@ const ACTIVE_TAB_KEY = 'gyd_active_tab';
 const SCAN_SETTINGS_KEY = 'gyd_scan_settings';
 const ACTIVE_SCAN_JOB_KEY = 'gyd_active_scan_job';
 
-type AppTab = 'dashboard' | 'scan' | 'output' | 'invites' | 'devices' | 'settings';
-const APP_TABS: AppTab[] = ['dashboard', 'scan', 'output', 'invites', 'devices', 'settings'];
+type AppTab = 'dashboard' | 'scan' | 'output' | 'invites' | 'devices' | 'osint' | 'settings';
+const APP_TABS: AppTab[] = ['dashboard', 'scan', 'output', 'invites', 'devices', 'osint', 'settings'];
 
 interface StoredScanSettings {
   region: string;
@@ -182,6 +182,16 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [dashLoading, setDashLoading] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+
+  // OSINT
+  const [osintIp, setOsintIp] = useState('');
+  const [osintDomain, setOsintDomain] = useState('');
+  const [osintEmailDomain, setOsintEmailDomain] = useState('');
+  const [osintIpResult, setOsintIpResult] = useState<any>(null);
+  const [osintDnsResult, setOsintDnsResult] = useState<any>(null);
+  const [osintEmailResult, setOsintEmailResult] = useState<any>(null);
+  const [osintIpError, setOsintIpError] = useState('');
+  const [osintLoading, setOsintLoading] = useState(false);
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInitRef = useRef(false);
   const mapInstRef = useRef<mapboxgl.Map | null>(null);
@@ -827,6 +837,36 @@ export default function App() {
     } catch {} finally { setDashLoading(false); }
   };
 
+  // ── OSINT ──
+
+  const lookupIp = async () => {
+    if (!osintIp.trim()) return;
+    setOsintLoading(true); setOsintIpError(''); setOsintIpResult(null);
+    try {
+      const r = await apiFetch('/api/osint/ip', { method: 'POST', body: JSON.stringify({ target: osintIp.trim() }) });
+      if (r.ok) setOsintIpResult(await r.json());
+      else { const e = await r.json(); setOsintIpError(e.error || 'Lookup failed'); }
+    } catch { setOsintIpError('Request failed'); } finally { setOsintLoading(false); }
+  };
+
+  const lookupDns = async () => {
+    if (!osintDomain.trim()) return;
+    setOsintLoading(true); setOsintDnsResult(null);
+    try {
+      const r = await apiFetch('/api/osint/dns', { method: 'POST', body: JSON.stringify({ domain: osintDomain.trim() }) });
+      if (r.ok) setOsintDnsResult(await r.json());
+    } catch {} finally { setOsintLoading(false); }
+  };
+
+  const lookupEmails = async () => {
+    if (!osintEmailDomain.trim()) return;
+    setOsintLoading(true); setOsintEmailResult(null);
+    try {
+      const r = await apiFetch('/api/osint/email', { method: 'POST', body: JSON.stringify({ domain: osintEmailDomain.trim() }) });
+      if (r.ok) setOsintEmailResult(await r.json());
+    } catch {} finally { setOsintLoading(false); }
+  };
+
   // ── Mapbox GL JS ──
 
   useEffect(() => {
@@ -1011,7 +1051,8 @@ export default function App() {
         case '3': setActiveTab('output'); break;
         case '4': setActiveTab('invites'); break;
         case '5': setActiveTab('devices'); break;
-        case '6': setActiveTab('settings'); break;
+        case '6': setActiveTab('osint'); break;
+        case '7': setActiveTab('settings'); break;
         case 's':
         case 'S':
           e.preventDefault();
@@ -1143,6 +1184,10 @@ export default function App() {
           <button className={`nav-btn ${activeTab === 'devices' ? 'active' : ''}`}
             onClick={() => setActiveTab('devices')}>
             <Terminal size={14} /> Devices
+          </button>
+          <button className={`nav-btn ${activeTab === 'osint' ? 'active' : ''}`}
+            onClick={() => setActiveTab('osint')}>
+            <Search size={14} /> OSINT
           </button>
           <button className={`nav-btn ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}>
@@ -1858,6 +1903,86 @@ export default function App() {
           </div>
         </div>
 
+        {/* ── OSINT ── */}
+        <div className={`tab-panel ${activeTab === 'osint' ? 'active' : ''}`}>
+          <div className="settings-grid">
+            {/* IP Lookup */}
+            <div className="settings-card">
+              <div className="settings-card-title"><Globe size={14} /> IP / Domain Lookup</div>
+              <div className="settings-card-body">
+                <p className="settings-desc">Resolve IP, geo location, ISP, reverse DNS.</p>
+                <div className="osint-input-row">
+                  <input className="input" placeholder="IP or domain..." value={osintIp}
+                    onChange={e => setOsintIp(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') lookupIp(); }} />
+                  <button className="btn sm" onClick={lookupIp} disabled={osintLoading}><Search size={12} /> Lookup</button>
+                </div>
+                {osintIpResult && (
+                  <div className="osint-result">
+                    {osintIpResult.dns?.a_record && <div><span className="osint-label">IP:</span> {osintIpResult.dns.a_record}</div>}
+                    {osintIpResult.reverse_dns && <div><span className="osint-label">PTR:</span> {osintIpResult.reverse_dns}</div>}
+                    {osintIpResult.geo && (
+                      <>
+                        <div><span className="osint-label">Country:</span> {osintIpResult.geo.country} ({osintIpResult.geo.countryCode})</div>
+                        <div><span className="osint-label">City:</span> {osintIpResult.geo.city}, {osintIpResult.geo.regionName}</div>
+                        <div><span className="osint-label">ISP:</span> {osintIpResult.geo.isp}</div>
+                        <div><span className="osint-label">ORG:</span> {osintIpResult.geo.org}</div>
+                        <div><span className="osint-label">AS:</span> {osintIpResult.geo.as}</div>
+                        <div><span className="osint-label">Lat/Lon:</span> {osintIpResult.geo.lat}, {osintIpResult.geo.lon}</div>
+                      </>
+                    )}
+                  </div>
+                )}
+                {osintIpError && <div className="osint-error">{osintIpError}</div>}
+              </div>
+            </div>
+
+            {/* DNS Lookup */}
+            <div className="settings-card">
+              <div className="settings-card-title"><Info size={14} /> DNS Lookup</div>
+              <div className="settings-card-body">
+                <p className="settings-desc">Query DNS records for a domain.</p>
+                <div className="osint-input-row">
+                  <input className="input" placeholder="domain.com..." value={osintDomain}
+                    onChange={e => setOsintDomain(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') lookupDns(); }} />
+                  <button className="btn sm" onClick={lookupDns} disabled={osintLoading}><Search size={12} /> Query</button>
+                </div>
+                {osintDnsResult && (
+                  <div className="osint-result">
+                    <div><span className="osint-label">A:</span> {osintDnsResult.records?.a || 'N/A'}</div>
+                    {osintDnsResult.records?.mx && osintDnsResult.records.mx.length > 0 && (
+                      <div><span className="osint-label">MX:</span> {osintDnsResult.records.mx.join(', ')}</div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Email Patterns */}
+            <div className="settings-card">
+              <div className="settings-card-title"><Mail size={14} /> Common Email Finder</div>
+              <div className="settings-card-body">
+                <p className="settings-desc">Generate common email patterns for a domain.</p>
+                <div className="osint-input-row">
+                  <input className="input" placeholder="example.com..." value={osintEmailDomain}
+                    onChange={e => setOsintEmailDomain(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') lookupEmails(); }} />
+                  <button className="btn sm" onClick={lookupEmails} disabled={osintLoading}><Search size={12} /> Generate</button>
+                </div>
+                {osintEmailResult && (
+                  <div className="osint-result">
+                    <div><span className="osint-label">Patterns ({osintEmailResult.count}):</span></div>
+                    {osintEmailResult.emails?.map((e: string, i: number) => (
+                      <div key={i} className="osint-email-line">{e}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+
         {/* ── Settings ── */}
         <div className={`tab-panel ${activeTab === 'settings' ? 'active' : ''}`}>
           <div className="settings-grid">
@@ -1896,7 +2021,8 @@ export default function App() {
                 <div className="shortcut-row"><kbd>3</kbd><span>Results</span></div>
                 <div className="shortcut-row"><kbd>4</kbd><span>Invites</span></div>
                 <div className="shortcut-row"><kbd>5</kbd><span>Devices</span></div>
-                <div className="shortcut-row"><kbd>6</kbd><span>Settings</span></div>
+                <div className="shortcut-row"><kbd>6</kbd><span>OSINT</span></div>
+                <div className="shortcut-row"><kbd>7</kbd><span>Settings</span></div>
                 <div className="shortcut-row"><kbd>S</kbd><span>Start / Stop scan</span></div>
                 <div className="shortcut-row"><kbd>Esc</kbd><span>Collapse all rows</span></div>
               </div>

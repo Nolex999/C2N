@@ -862,7 +862,7 @@ def get_relevant_creds(device_type, max_creds=10):
 
 _auth_attempt_counts = {}
 _auth_attempt_lock = threading.Lock()
-MAX_AUTH_PER_IP = 12
+MAX_AUTH_PER_IP = 30
 
 
 SESSION_COOKIE_NAMES = [
@@ -885,6 +885,72 @@ def response_has_session_cookie(r):
             return True
     set_cookie = (r.headers.get("Set-Cookie", "") or "").lower()
     return bool(HAS_SESSION_COOKIE.search(set_cookie))
+
+
+LOGIN_FORM_RE = re.compile(
+    r'<form[^>]*?action=["\'](.*?)["\'][^>]*?>(.*?)</form>',
+    re.I | re.S
+)
+INPUT_RE = re.compile(
+    r'<input\s[^>]*?(?:name=["\'](.*?)["\'])[^>]*?(?:type=["\'](.*?)["\'])?', re.I
+)
+INPUT_RE_NAME_FIRST = re.compile(
+    r'<input\s[^>]*?(?:name=["\'](.*?)["\'])[^>]*?>', re.I
+)
+FORM_METHOD_RE = re.compile(r'method=["\'](get|post)["\']', re.I)
+
+
+def extract_login_form(body):
+    if not body:
+        return None
+    forms = LOGIN_FORM_RE.findall(body)
+    for action, inner in forms:
+        pw_count = len(INPUT_RE_NAME_FIRST.findall(inner)) if re.search(r'type=["\']?password["\']?', inner, re.I) else 0
+        if pw_count == 0 and 'password' not in inner.lower():
+            continue
+        inputs = []
+        for m in INPUT_RE.finditer(inner):
+            name = m.group(1)
+            itype = (m.group(2) or 'text').lower()
+            if name and itype not in ('submit', 'button', 'hidden', 'image', 'reset'):
+                inputs.append({'name': name, 'type': itype})
+        method_m = FORM_METHOD_RE.search(inner)
+        method = (method_m.group(1) if method_m else 'post').upper()
+        return {
+            'action': action.strip(),
+            'method': method,
+            'inputs': inputs,
+        }
+    return None
+
+
+def try_form_auth(ip, port, scheme, user, pw, login_form, base_url):
+    action = login_form['action']
+    method = login_form['method']
+    inputs = login_form['inputs']
+    action_url = action if action.startswith('http') else (
+        action if action.startswith('/') else f"{base_url}/{action}"
+    )
+    if action.startswith('/'):
+        action_url = f"{scheme}://{ip}:{port}{action}"
+    elif not action.startswith('http'):
+        action_url = f"{base_url}/{action}"
+    data = {}
+    for inp in inputs:
+        if inp['type'] == 'password':
+            data[inp['name']] = pw
+        elif inp['type'] in ('text', 'email', 'tel', ''):
+            data[inp['name']] = user
+        else:
+            data[inp['name']] = ''
+    try:
+        if method == 'GET':
+            r = requests.get(action_url, params=data, timeout=5, allow_redirects=True, verify=False)
+        else:
+            r = requests.post(action_url, data=data, timeout=5, allow_redirects=True, verify=False)
+        return r
+    except:
+        return None
 
 
 def try_auth(ip, port, device_type="", use_https=False, unauth_body=""):
