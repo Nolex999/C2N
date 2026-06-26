@@ -712,6 +712,157 @@ def identify_device(r):
 
 # ─────────────── Device Classification ───────────────
 
+BUSINESS_TITLE_KW = [
+    "outlook", "exchange", "owa", "office365", "webmail", "mail",
+    "vpn", "fortinet", "fortigate", "paloalto", "sonicwall",
+    "citrix", "vmware", "vsphere", "horizon", "workspace",
+    "sharepoint", "confluence", "jira", "gitlab", "jenkins", "bitbucket",
+    "crm", "erp", "sap", "oracle", "salesforce", "zoho",
+    "intranet", "portal", "enterprise", "corporate", "business",
+    "dashboard", "admin", "management", "console",
+    "cloud", "aws", "azure", "gcp", "digitalocean", "linode",
+    "kubernetes", "docker", "openshift", "rancher",
+    "jenkins", "build", "deploy", "monitoring", "grafana", "prometheus",
+    "kibana", "elastic", "logstash", "splunk",
+    "mysql", "phpmyadmin", "adminer", "database",
+    "wordpress", "drupal", "joomla", "moodle", "lms",
+    "api", "swagger", "graphql", "rest",
+    "snipe-it", "osticket", "zammad", "freshdesk", "servicenow",
+    "openvpn", "wireguard", "pfsense", "opnsense",
+    "prtg", "nagios", "zabbix", "cacti", "observium", "librenms",
+    "cpanel", "whm", "plesk", "webmin", "vesta",
+    "nextcloud", "owncloud", "seafile", "synology",
+    "docker-registry", "nexus", "artifactory", "harbor",
+    "hyper-v", "proxmox", "xen", "ovirt", "virtualization",
+]
+
+CONSUMER_TITLE_KW = [
+    "camera", "webcam", "ipcam", "cctv", "dvr", "nvr",
+    "router", "modem", "gateway", "repeater", "extender", "ap ",
+    "access point", "wifi", "wireless", "hotspot",
+    "printer", "mfp", "scanner", "multifunction",
+    "nas", "storage", "diskstation",
+    "hikvision", "dahua", "axis", "reolink", "amcrest", "foscam",
+    "grandstream", "yealink", "polycom",
+    "tp-link", "d-link", "dlink", "netgear", "linksys", "asus",
+    "xiaomi", "tplink", "mikrotik", "ubiquiti", "unifi",
+    "airmax", "nanostation", "loco", "powerbeam",
+    "openwrt", "dd-wrt", "tomato", "gargoyle",
+    "shellinabox", "ajaxterm", "anyterm",
+    "motion", "mjpeg", "rtsp", "onvif",
+    "elastix", "freepbx", "asterisk", "3cx", "pbx",
+    "pfsense", "opnsense", "sophos", "untangle",
+    "kodi", "plex", "emby", "jellyfin",
+    "octoprint", "astroid", "tesla",
+    "fritz!box", "speedport", "easybox",
+    "swann", "lorex", "night owl", "zmodo",
+]
+
+RESIDENTIAL_ISP_KEYWORDS = [
+    "comcast", "verizon", "at&t", "t-mobile", "sprint", "centurylink",
+    "cox", "charter", "spectrum", "optimum", "frontier", "windstream",
+    "mediacom", "suddenlink", "cableone", "wow!", "cablevision",
+    "free.fr", "orange", "sfr", "bouygues", "numericable", "neuf",
+    "deutsche telekom", "vodafone", "o2", "unitymedia", "kabel",
+    "bt", "virgin media", "sky", "talktalk", "plusnet", "ee",
+    "telecom italia", "fastweb", "wind", "tre",
+    "telefonica", "movistar", "jazztel", "ono",
+    "swisscom", "sunrise", "salt",
+    "rogers", "bell", "shaw", "telus", "videotron",
+    "optus", "telstra", "tpg", "ii",
+    "nifty", "so-net", "ocn", "biglobe", "au one net",
+    "sk broadband", "kt", "lg u+",
+    "singtel", "starhub", "m1",
+    "tm net", "unifi", "maxis",
+    "true", "ais", "dtac",
+    "chinanet", "china unicom", "china telecom", "cmcc",
+]
+
+HOSTING_ISP_KEYWORDS = [
+    "amazon", "aws", "ec2", "lightsail",
+    "google cloud", "gcp", "compute engine",
+    "microsoft azure", "azure",
+    "digitalocean", "linode", "vultr", "hetzner", "ovh", "scaleway",
+    "ionos", "1&1", "strato", "contabo", "netcup", "kimsu",
+    "rackspace", "softlayer", "ibm cloud", "oracle cloud",
+    "alibaba cloud", "tencent cloud", "huawei cloud",
+    "cloudflare", "fastly", "akamai",
+    "leaseweb", "psychz", "cogent", "gtt", "nlayer",
+    "serverius", "mythic", "buyvm", "ramnode",
+    "data center", "datacenter", "colo", "colocation",
+]
+
+# Combine all keywords into sets for fast lookup
+BUSINESS_KW_SET = set(kw.lower() for kw in BUSINESS_TITLE_KW)
+CONSUMER_KW_SET = set(kw.lower() for kw in CONSUMER_TITLE_KW)
+
+
+def classify_business(item):
+    """Return {'is_business': bool, 'score': int, 'label': str}
+    score: 0-100. 0 = definitely consumer, 100 = definitely business.
+    label: short reason string.
+    """
+    device = (item.get("device") or "").lower()
+    org = (item.get("org") or "").lower()
+    isp = (item.get("isp") or "").lower()
+    port = item.get("port", 0)
+    url = (item.get("url") or "").lower()
+
+    score = 50  # neutral start
+    reasons = []
+
+    # ── Device title analysis ──
+    for kw in BUSINESS_KW_SET:
+        if kw in device:
+            score += 25
+            reasons.append(f"title:{kw}")
+            break  # one match is enough
+
+    for kw in CONSUMER_KW_SET:
+        if kw in device:
+            score -= 30
+            reasons.append(f"hw:{kw}")
+            break
+
+    # Known hardware device names substrings
+    for name in HARDWARE_DEVICE_NAMES:
+        if name.lower() in device:
+            score -= 20
+            reasons.append(f"hw:{name}")
+            break
+
+    # ── ISP / ORG analysis ──
+    for kw in RESIDENTIAL_ISP_KEYWORDS:
+        if kw in isp or kw in org:
+            score -= 20
+            reasons.append(f"isp:{kw}")
+            break
+
+    for kw in HOSTING_ISP_KEYWORDS:
+        if kw in isp or kw in org:
+            score += 15
+            reasons.append(f"host:{kw}")
+            break
+
+    # ── Port heuristic ──
+    # Business HTTPS is more likely on 443/8443, but consumer too
+    # Ports like 8080, 80 are common for consumer devices
+    # Not a strong signal but useful
+
+    # ── URL pattern ──
+    if "/cgi-bin/" in url or "/cgi/" in url:
+        score -= 15  # common in cheap cameras/routers
+        reasons.append("cgi-url")
+
+    if "/login" in url or "/auth" in url or "/signin" in url:
+        pass  # neutral — everyone has this
+
+    # ── Final threshold ──
+    is_business = score >= 45
+    label = ", ".join(reasons[:3]) if reasons else ("no signals" if score < 45 else "enterprise keywords")
+    return {"is_business": is_business, "score": score, "label": label}
+
+
 HARDWARE_DEVICE_NAMES = [
     "router", "switch", "access point", "modem", "gateway",
     "firewall", "vpn", "bridge", "repeater", "extender",

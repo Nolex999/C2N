@@ -76,6 +76,7 @@ interface ScanResultItem {
   note?: string; status_code?: number; country?: string; country_code?: string;
   region_name?: string; city?: string; lat?: number; lon?: number;
   org?: string; isp?: string; as_info?: string; broken?: boolean;
+  business?: boolean; business_score?: number; business_label?: string;
 }
 
 interface ScanResult {
@@ -171,6 +172,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [items, setItems] = useState<ScanResultItem[]>([]);
   const [detailView, setDetailView] = useState<'list' | 'raw'>('list');
+  const [businessOnly, setBusinessOnly] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [deviceStates, setDeviceStates] = useState<Record<number, DeviceState>>({});
   const [histLoading, setHistLoading] = useState(false);
@@ -1594,6 +1596,10 @@ export default function App() {
                       </div>
                       <div className="detail-head-sub">
                         {new Date(outputs.find(o => o.id === selectedId)?.created_at || '').toLocaleString()} · {items.length} items
+                        <label className="biz-toggle" title="Show only business/enterprise panels">
+                          <input type="checkbox" checked={businessOnly} onChange={e => setBusinessOnly(e.target.checked)} />
+                          <span>Business</span>
+                        </label>
                       </div>
                     </div>
                     <div className="detail-actions">
@@ -1619,7 +1625,7 @@ export default function App() {
                         <p>This scan returned no accessible devices.</p>
                       </div>
                     ) : (
-                      items.map(item => {
+                      items.filter(item => !businessOnly || item.business).map(item => {
                         const isOpen = expanded.has(item.id);
                         const ds = deviceStates[item.id] || {
                           loading: false, status: item.broken ? '✓ Working' : '—',
@@ -1639,6 +1645,7 @@ export default function App() {
                                 <span className="acc-ip">{item.ip}:{item.port}</span>
                                 <span className="acc-device">{item.device || '?'}</span>
                                 {item.country_code && <span className="acc-device">· {item.country_code}</span>}
+                                {item.business && <span className="badge biz" title={item.business_label}>BIZ</span>}
                                 {item.org && <span className="acc-org">· {item.org.slice(0, 40)}</span>}
                               </div>
                               <div className="acc-btns">

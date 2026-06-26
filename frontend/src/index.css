@@ -1500,6 +1500,11 @@ tbody tr.open td { border-left: 3px solid var(--orange); }
   align-items: center;
 }
 
+/* ── Business Filter ── */
+.biz-toggle { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px; font-size: 12px; cursor: pointer; color: var(--gray-400); user-select: none; }
+.biz-toggle input { accent-color: var(--amber); }
+.badge.biz { background: rgba(251,191,36,0.15); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
+
 /* ── OSINT ── */
 .osint-input-row {
   display: flex;

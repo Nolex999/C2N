@@ -453,10 +453,15 @@ def api_delete_result(user, result_id):
 @require_auth
 def api_result_items(user, result_id):
     try:
+        from GetYourDevice import classify_business
         resp = supabase.table("scan_result_items").select("*").eq("result_id", result_id).order("item_index").execute()
         out = []
         for r in resp.data:
             r["id"] = int(r.get("item_index", 0))
+            biz = classify_business(r)
+            r["business"] = biz["is_business"]
+            r["business_score"] = biz["score"]
+            r["business_label"] = biz["label"]
             out.append(r)
         return jsonify(out)
     except Exception as e:
@@ -466,10 +471,15 @@ def api_result_items(user, result_id):
 @require_auth
 def api_broken_items(user, result_id):
     try:
+        from GetYourDevice import classify_business
         resp = supabase.table("scan_result_items").select("*").eq("result_id", result_id).eq("broken", True).execute()
         out = []
         for r in resp.data:
             r["id"] = int(r.get("item_index", 0))
+            biz = classify_business(r)
+            r["business"] = biz["is_business"]
+            r["business_score"] = biz["score"]
+            r["business_label"] = biz["label"]
             out.append(r)
         return jsonify(out)
     except Exception as e:
@@ -795,6 +805,40 @@ def api_classify_device(user):
     from GetYourDevice import classify_device_type
     ctype = classify_device_type(device_name)
     return jsonify({"classification": ctype, "is_device": ctype == "device"})
+
+
+@app.route("/api/devices/business", methods=["GET"])
+@require_auth
+def api_business_devices(user):
+    from GetYourDevice import classify_business
+    try:
+        resp = supabase.table("scan_result_items").select("*").in_("auth_found", [True]).order("id", desc=True).limit(500).execute()
+        devices = []
+        seen = set()
+        for it in resp.data:
+            ip = it.get("ip")
+            if ip in seen: continue
+            seen.add(ip)
+            biz = classify_business(it)
+            if not biz["is_business"]:
+                continue
+            devices.append({
+                "id": it["id"],
+                "ip": it["ip"],
+                "port": it["port"],
+                "url": it.get("url"),
+                "device": it.get("device"),
+                "username": it.get("username"),
+                "password": it.get("password"),
+                "country_code": it.get("country_code"),
+                "org": it.get("org"),
+                "broken": it.get("broken", False),
+                "business_score": biz["score"],
+                "business_label": biz["label"],
+            })
+        return jsonify({"devices": devices, "total": len(devices)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/exploit/devices", methods=["GET"])
